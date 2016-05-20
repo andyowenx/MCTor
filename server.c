@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include <unistd.h>
 #include <malloc.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -8,6 +7,10 @@
 #include <openssl/aes.h>
 #include <openssl/err.h>
 #include <pthread.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <ev.h>
 
 
 #define HOST "localhost"
@@ -21,40 +24,51 @@ SSL_CTX* InitServerCTX(void);
 void LoadCertificates(SSL_CTX* ctx, char* CertFile, char* KeyFile);
 void ShowCerts(SSL* ssl);
 void Servlet(SSL* ssl);
+static void first_handle(struct ev_loop*loop,struct ev_io*watcher,int revents);
+void getOutsideAddr(int browser_fd,struct sockaddr_in*outside_addr);
 
 
+
+static void second_handle(struct ev_loop*loop,struct ev_io*watcher,int revents);
 int main()
 {
-	SSL_library_init();
+	//SSL_library_init();
+	signal(SIGPIPE,SIG_IGN);
 	int server_fd=server_init();
-	int client_fd , client_len;
-	struct sockaddr_in client_addr;
-	bzero((char*)&client_addr,sizeof(client_addr));
-	client_len=sizeof(client_addr);
-	SSL_CTX *ctx;
-	ctx=InitServerCTX();
-	LoadCertificates(ctx,CA,KEY);
+	struct ev_loop *my_loop=NULL;
+	struct ev_io fd;
+	my_loop=ev_default_loop(0);
 
+	ev_io_init(&fd,first_handle,server_fd,EV_READ);
+	ev_io_start(my_loop,&fd);
+	ev_loop(my_loop,0);
+	/*
+	//SSL_CTX *ctx;
+	//ctx=InitServerCTX();
+	//LoadCertificates(ctx,CA,KEY);
 	while (1){
+		printf("into accept\n");
 		if (  (client_fd=accept(server_fd,  (struct sockaddr*)&client_addr,      &client_len)) <0){
 			perror("accept error\n");
 			exit(1);
 		}
-		SSL *ssl;
-		ssl=SSL_new(ctx);
-		SSL_set_fd(ssl,client_fd);
-		Servlet(ssl);
-		printf("ssl success\n");
+	//	SSL *ssl;
+	//	ssl=SSL_new(ctx);
+	//	SSL_set_fd(ssl,client_fd);
+	//	Servlet(ssl);
+	//	printf("ssl success\n");
 	}
 	close(server_fd);
-	SSL_CTX_free(ctx);
-	AES_KEY enc_key, dec_key;
+	//SSL_CTX_free(ctx);
+	//AES_KEY enc_key, dec_key;
+	*/
 	return 0;
 }
 
 int server_init()
 {
 	int server_fd;
+	int flag,option;
 	struct sockaddr_in server_addr;
 	if ( (server_fd=socket(AF_INET,SOCK_STREAM,0)) <0){
 		perror("socket open error\n");
@@ -65,6 +79,23 @@ int server_init()
 	server_addr.sin_family=AF_INET;
 	server_addr.sin_addr.s_addr=INADDR_ANY;
 	server_addr.sin_port=htons(PORT);
+
+
+	if ( (flag=fcntl(server_fd,F_GETFL,0))==-1  ){
+		perror("fcntl error in F_GETFL\n");
+		exit(1);
+	}
+	if (fcntl(server_fd,F_SETFL,flag|O_NONBLOCK)==-1  ){
+		perror("fcntl error in F_SETFL\n");
+		exit(1);
+	}
+	
+	option=1;
+	if (  setsockopt(server_fd,SOL_SOCKET,SO_REUSEADDR,(uint*)&option , sizeof(option)) ==-1    ){
+		perror("setsockopt error\n");
+		exit(1);
+	}
+
 
 	if  ( bind(server_fd,(struct sockaddr*)&server_addr,sizeof(server_addr)) <0  ){
 		perror("bind error\n");
@@ -172,4 +203,43 @@ void Servlet(SSL* ssl)	/* Serve the connection -- threadable */
 	close(sd);										/* close connection */
 }
 
+static void first_handle(struct ev_loop*loop,struct ev_io*watcher,int revents)
+{
+	int browser_fd;
+	struct sockaddr_in browser_addr , outside_addr;
+	int browser_len=sizeof(browser_addr);
+	if (revents&EV_ERROR){
+		printf("error at first handle , revent error\n");
+		return;
+	}
+	if (  ( browser_fd=accept(watcher->fd, (struct sockaddr*)&browser_addr,&browser_len) )  <0 ){
+		printf("error at first handle , accept error\n");
+		return;
+	}
+	getOutsideAddr(browser_fd,&outside_addr);
+}
 
+
+void getOutsideAddr(int browser_fd,struct sockaddr_in*outside_addr)
+{
+	//-----set the socket option first-----
+	struct timeval time_opt={0};
+	int option=1;
+	time_opt.tv_sec=2;
+	time_opt.tv_usec=0;
+	if ( (setsockopt(browser_fd,SOL_SOCKET,SO_RCVTIMEO,(char*)&time_opt,sizeof(time_opt))  == -1)
+		|| (    setsockopt(browser_fd,SOL_SOCKET,SO_SNDTIMEO,(char*)&time_opt,sizeof(time_opt))  ==-1)  ){
+		printf("setsockopt error at getOutsideAddr\n");
+		return;
+	}
+	if ( setsockopt(browser_fd,SOL_SOCKET,SO_REUSEADDR,(uint*)&option,sizeof(option)) ==-1   ){
+		printf("setsockopt reuse error at getOutsideAddr");
+		return;
+	}
+	
+}
+
+
+static void second_handle(struct ev_loop*loop,struct ev_io*watcher,int revents)
+{
+}
