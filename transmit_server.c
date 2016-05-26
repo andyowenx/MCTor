@@ -10,17 +10,10 @@
 #include <openssl/aes.h>
 #include <pthread.h>
 #include <unistd.h>
+#include "hidden_info.h"
 
-#define PORT_BEGIN 9000
-#define THREAD_NUM 1
-#define ENTRY_IP "140.123.103.190"
-#define ENTRY_PORT 9000
-#define MIDDLE_IP "140.123.103.191"
-#define MIDDLE_PORT 9000
-#define EXIT_IP "140.123.103.192"
-#define EXIT_PORT 9000
-#define MAXBUFF 2048
-#define MY_NODE "middle"
+
+#define MY_NODE "ENTRY"
 
 typedef struct{
 	int fd;
@@ -86,7 +79,7 @@ void thread_func(void*data)
 	}
 
 	recv(prev_fd,buff,MAXBUFF,0);
-	printf("%s\n",buff);
+	puts(buff);
 
 
 }
