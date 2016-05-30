@@ -16,45 +16,85 @@
 #include <netdb.h>
 #include "hidden_info.h"
 
-typedef struct cell_queue{
-	struct cell_queue*next;
-	char*content;
-}CELL_QUEUE;
-
-CELL_QUEUE*queue_head=NULL;
-int streamid_master=0;
+/*
+   typedef struct cell_queue{
+   struct cell_queue*next;
+   char*content;
+   }CELL_QUEUE;
 
 
-int server_init(void);
+
+   CELL_QUEUE*queue_head[THREAD_NUM];
+   pthread_mutex_t lock;
+
+   CELL_QUEUE*get_queue_head(int thread_id);
+   CELL_QUEUE*queue_init(int buff_len);
+   void queue_insert(char*str,int len);
+   void queue_delete(CELL_QUEUE*walker);
+ */
+typedef struct conn_info{
+	struct conn_info*next;
+	int browser_fd;
+	int streamid;
+	uint32_t thread_id;
+}CONN_INFO;
+
+CONN_INFO thread_head[THREAD_NUM];
+
+uint32_t streamid_master=0;
+int entry_fd[THREAD_NUM];
+
+struct ev_loop *my_loop=NULL;
+
 SSL_CTX* InitServerCTX(void);
 void LoadCertificates(SSL_CTX* ctx, char* CertFile, char* KeyFile);
 void ShowCerts(SSL* ssl);
 void Servlet(SSL* ssl);
+
+int server_init(void);
 static void browser_connect_to_proxy(struct ev_loop*loop,struct ev_io*watcher,int revents);
-void getOutsideAddr(int browser_fd,struct sockaddr_in*outside_addr);
+char* getOutsideAddr(int browser_fd);
 void sock_auth_fail(int step,int kind);
-int get_stream_id();
-static void second_handle(struct ev_loop*loop,struct ev_io*watcher,int revents);
-void thread_func(int id);
+uint32_t get_stream_id();
+uint32_t connection_distribute(uint32_t streamid);
+static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents);
+
+
+void thread_func(int*id);
+
+CONN_INFO*info_init(int browser_fd,int streamid,int thread_id);
+void info_insert(CONN_INFO*head,CONN_INFO*tag);
+void info_delete(CONN_INFO*head,CONN_INFO*tag);
+CONN_INFO*info_search(CONN_INFO*head,int streamid);
 
 int main()
 {
 	//SSL_library_init();
+	/*
+	   if (  pthread_mutex_init(&lock,NULL) !=0){
+	   printf("pthread mutex fail\n");
+	   exit(1);
+	   }
+	 */
 	signal(SIGPIPE,SIG_IGN);
 	int server_fd=server_init();
-	struct ev_loop *my_loop=NULL;
 	struct ev_io fd;
 	pthread_t thread[THREAD_NUM];
-	int i;
+	int i,thread_id[THREAD_NUM];
 
-	for (i=0;i<THREAD_NUM;i++)
-		pthread_create(&thread[i],NULL,(void*)thread_func,(void*)&i);
+
+	for (i=0;i<THREAD_NUM;i++){
+		thread_id[i]=i;
+		pthread_create(&thread[i],NULL,(void*)thread_func,(void*)&thread_id[i]);
+	}
+
 
 	my_loop=ev_default_loop(0);
 
 	ev_io_init(&fd,browser_connect_to_proxy,server_fd,EV_READ);
 	ev_io_start(my_loop,&fd);
 	ev_loop(my_loop,0);
+
 	/*
 	//SSL_CTX *ctx;
 	//ctx=InitServerCTX();
@@ -77,6 +117,28 @@ int main()
 	 */
 	return 0;
 }
+
+/*
+   CELL_QUEUE*get_queue_head(int thread_id)
+   {
+   return queue_head[thread_id];
+   }
+
+   CELL_QUEUE*queue_init(int buff_len)
+   {
+   CELL_QUEUE*cell;
+   cell=(CELL_QUEUE*)malloc(sizeof(CELL_QUEUE));
+   cell->content=(char*)malloc(buff_len*sizeof(char));
+   return cell;
+   }
+
+   void queue_insert(CELL_QUEUE*head,char*str,int len)
+   {
+   CELL_QUEUE*p=queue_init(len);
+   a
+
+   }
+ */
 
 int server_init()
 {
@@ -218,9 +280,14 @@ void Servlet(SSL* ssl)	/* Serve the connection -- threadable */
 
 static void browser_connect_to_proxy(struct ev_loop*loop,struct ev_io*watcher,int revents)
 {
-	int browser_fd , streamid;
-	struct sockaddr_in browser_addr , outside_addr , entry_addr;
+	int browser_fd  , connect_tag;
+	uint32_t streamid ,payload_len;
+	struct sockaddr_in browser_addr , entry_addr;
 	int browser_len=sizeof(browser_addr);
+	char *outside;
+	char payload[MAXBUFF];
+	struct ev_io*browser_watcher;
+
 	if (revents&EV_ERROR){
 		printf("error at browser_connect_to_proxy , revent error\n");
 		return;
@@ -231,46 +298,64 @@ static void browser_connect_to_proxy(struct ev_loop*loop,struct ev_io*watcher,in
 		return;
 	}
 
-	getOutsideAddr(browser_fd,&outside_addr);
-
-	streamid=get_stream_id();
-
-	//-----send outside addr to exit-----
+	outside=getOutsideAddr(browser_fd);
 	
+	if (outside==NULL){
+		printf("error happen , drop this connection\n");
+		return;
+	}
+	
+	payload_len=7;
+	streamid=get_stream_id();
+	connect_tag=connection_distribute(streamid);
+	//-----send outside addr to exit node-----
+	CONN_INFO*info=info_init(browser_fd,streamid,connect_tag);
+	info_insert(&thread_head[connect_tag],info);
+
+	send(entry_fd[connect_tag],&streamid,sizeof(uint32_t),0);		//-----stream id-----
+	send(entry_fd[connect_tag],&payload_len,sizeof(uint32_t),0);		//-----offset-----
+	send(entry_fd[connect_tag],outside,payload_len*sizeof(char),0);	//-----payload-----
+	
+	browser_watcher=(struct ev_io*)malloc(sizeof(struct ev_io));
+	browser_watcher->data=(void*)info;
+	ev_io_init(browser_watcher, read_browser, browser_fd,EV_READ);
+	ev_io_start(my_loop,browser_watcher);
 }
 
 
-void getOutsideAddr(int browser_fd,struct sockaddr_in*outside_addr)
+char*getOutsideAddr(int browser_fd)
 {
 	//-----set the socket option first-----
 	struct timeval time_opt={0};
-	int option=1 , outside_len , hostname_len;
+	int option=1 , hostname_len;
 	char buff[MAXBUFF];
+	char *return_str=(char*)malloc(7*sizeof(char));
 	time_opt.tv_sec=2;
 	time_opt.tv_usec=0;
-	if ( (setsockopt(browser_fd,SOL_SOCKET,SO_RCVTIMEO,(char*)&time_opt,sizeof(time_opt))  == -1)
+
+if ( (setsockopt(browser_fd,SOL_SOCKET,SO_RCVTIMEO,(char*)&time_opt,sizeof(time_opt))  == -1)
 			|| (    setsockopt(browser_fd,SOL_SOCKET,SO_SNDTIMEO,(char*)&time_opt,sizeof(time_opt))  ==-1)  ){
 		printf("setsockopt error at getOutsideAddr\n");
-		return;
+		return NULL;
 	}
 	if ( setsockopt(browser_fd,SOL_SOCKET,SO_REUSEADDR,(uint*)&option,sizeof(option)) ==-1   ){
 		printf("setsockopt reuse error at getOutsideAddr");
-		return;
+		return NULL;
 	}
 	//-----socket auth , step one-----
 	if ( recv(browser_fd,buff,MAXBUFF,0) ==-1 ){
 		sock_auth_fail(1,0);
-		return;
+		return NULL;
 	}
 	if ( send(browser_fd,"\x05\x00",2,0)==-1  ){
 		sock_auth_fail(1,1);
-		return;
+		return NULL;
 	}
 
 	//-----socket auth , step two-----
 	if ( recv(browser_fd,buff,4,0)==-1){
 		sock_auth_fail(2,0);
-		return;
+		return NULL;
 	}
 	if (buff[0]==5	//socket5
 			||buff[1]==1){	//CONNECT
@@ -278,58 +363,54 @@ void getOutsideAddr(int browser_fd,struct sockaddr_in*outside_addr)
 		buff[1]=7;	//connection not support
 		buff[2]=0;	//end
 		send(browser_fd,buff,4,0); //-----command not support-----
-		return;
+		return NULL;
 	}
 	if (buff[3]==1){  //-----IPv4-----
-		bzero((char*)outside_addr,sizeof(outside_addr));
-		outside_addr->sin_family=AF_INET;
 		if ( recv(browser_fd,buff,4,0) ==-1){
 			sock_auth_fail(2,0);
-			return;
+			return NULL;
 		}
-		memcpy(&(outside_addr->sin_addr.s_addr),buff,4);
+		memcpy(return_str,buff,4);
 		if (  recv(browser_fd,buff,2,0) ==-1){
 			sock_auth_fail(2,0);
-			return;
+			return NULL;
 		}
-		memcpy(&(outside_addr->sin_port),buff,2);
+		memcpy(return_str+4,buff,2);
 
-		printf("outside addr :  %s:%d\n",inet_ntoa(outside_addr->sin_addr),htons(outside_addr->sin_port));
+		//printf("outside addr :  %s:%d\n",inet_ntoa(outside_addr->sin_addr),htons(outside_addr->sin_port));
 	}
 	else if (buff[3]==3){ //-----query with domain name-----
 		struct hostent *hp;
-		bzero((char*)outside_addr,sizeof(outside_addr));
-		outside_addr->sin_family=AF_INET;
 		if (  recv(browser_fd,buff,1,0) ==-1){
 			sock_auth_fail(2,0);
-			return;
+			return NULL;
 		}
 		hostname_len=buff[0];
 		buff[hostname_len]=0;
 		if (  recv(browser_fd,buff,hostname_len,0) ==-1){
 			sock_auth_fail(2,0);
-			return;
+			return NULL;
 		}
 		hp=gethostbyname(buff);
 		printf("outside domain : %s\n",buff);
 		if (buff==NULL){
 			printf("domain name is NULL at getOutsideAddr\n");
-			return;
+			return NULL;
 		}
 		if (hp->h_addrtype!=AF_INET){
 			printf("struct hostent->h_addrtype error at getOutsideAddr\n");
-			return;
+			return NULL;
 		}
 		if (*(hp->h_addr_list)==NULL){
 			printf("struct hostent->h_addr_list errpr at getOutsideAddr\n");
-			return;
+			return NULL;
 		}
-		memcpy(&(outside_addr->sin_addr.s_addr),*(hp->h_addr_list),4);
+		memcpy( return_str,*(hp->h_addr_list),4);
 		if (  recv(browser_fd,buff,2,0) ==-1){
 			sock_auth_fail(2,0);
-			return;
+			return NULL;
 		}
-		memcpy(&(outside_addr->sin_port),buff,2);
+		memcpy( return_str+4,buff,2);
 
 	}
 	else{   //-----command not support-----
@@ -338,10 +419,11 @@ void getOutsideAddr(int browser_fd,struct sockaddr_in*outside_addr)
 		buff[2]=0;
 		if ( send(browser_fd,buff,4,0) ==-1){
 			sock_auth_fail(2,1);
-			return;
+			return NULL;
 		}
 	}
-	return;
+	return_str[6]=0;
+	return return_str;
 }
 
 void sock_auth_fail(int step,int kind)
@@ -351,31 +433,140 @@ void sock_auth_fail(int step,int kind)
 	else //-----send fail-----
 		printf("send socket auth fail at step %d at getOutsideAddr\n",step);
 }
-int get_stream_id(void)
+uint32_t get_stream_id(void)
 {
 	return streamid_master++;
 }
-static void second_handle(struct ev_loop*loop,struct ev_io*watcher,int revents)
+
+uint32_t connection_distribute(uint32_t streamid)
 {
+	return streamid%THREAD_NUM;
 }
-void thread_func(int id)
+
+static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 {
-	int entry_fd;
-	struct sockaddr_in entry_addr;
+	char buff[MAXBUFF];
+	ssize_t result;
+	uint32_t len;
+	if (EV_ERROR & revents){
+		printf("revents error at read browser\n");
+		return;
+	}
 	
-	if ( (entry_fd=socket(AF_INET,SOCK_STREAM,0)) <0 ){
-		printf("open socket error at thread %d\n",id);
+	CONN_INFO*info=(CONN_INFO*)watcher->data;
+	result=recv(watcher->fd,buff,MAXBUFF,0);
+
+	len=result;
+	//-----end of connection-----
+	if (result<=0){
+		ev_io_stop(my_loop,watcher);
+		if (watcher->fd)
+			close(watcher->fd);
+		info_delete(&thread_head[info->thread_id],info);
+		free(watcher);
+	}
+	else{  //-----normal receive packet from browser-----
+		send(entry_fd[info->thread_id],&(info->streamid),sizeof(uint32_t),0);		//-----stream id-----
+		send(entry_fd[info->thread_id],&len,sizeof(uint32_t),0);		//-----offset-----
+		send(entry_fd[info->thread_id],buff,len*sizeof(char),0);	//-----payload-----
+	}
+}
+
+CONN_INFO*info_init(int browser_fd,int streamid,int thread_id)
+{
+	CONN_INFO*info=(CONN_INFO*)malloc(sizeof(CONN_INFO));
+	info->next=NULL;
+	info->browser_fd=browser_fd;
+	info->streamid=streamid;
+	info->thread_id=thread_id;
+	return info;
+}
+
+void info_insert(CONN_INFO*head,CONN_INFO*tag)
+{
+	CONN_INFO*walker;
+	if (head==NULL){
+		head=tag;
+		tag->next=NULL;
+		return;
+	}
+
+	for (walker=head;walker->next!=NULL;walker=walker->next)//-----get the last node-----
+		;
+
+	walker->next=tag;
+	tag->next=NULL;
+
+	return;
+}
+void info_delete(CONN_INFO*head,CONN_INFO*tag)
+{
+	CONN_INFO*walker,*prev;
+	int tag_streamid=tag->streamid;
+	if (head->streamid==tag_streamid){
+		prev=head;
+		head=head->next;
+		free(prev);
+		return;
+	}
+
+	for (walker=head->next,prev=head;walker!=NULL;walker=walker->next){
+		if (walker->streamid==tag_streamid){
+			prev->next=walker->next;
+			free(walker);
+			return;
+		}
+		prev=walker;
+	}
+}
+CONN_INFO*info_search(CONN_INFO*head,int streamid)
+{
+	CONN_INFO*walker;
+	for (walker=head;walker!=NULL;walker=walker->next){
+		if (walker->streamid==streamid)
+			return walker;
+	}
+	return NULL;
+}
+
+
+
+
+void thread_func(int*id)
+{
+	struct sockaddr_in entry_addr;
+	struct ev_io*entry_watcher,*browser_watcher;
+	uint32_t streamid , payload_len;
+	char buff[MAXBUFF];
+	CONN_INFO*ptr;
+
+	if ( (entry_fd[*id]=socket(AF_INET,SOCK_STREAM,0)) <0 ){
+		printf("open socket error at thread %d\n",*id);
 		return;
 	}
 
 	bzero((char*)&entry_addr,sizeof(entry_addr));
 	entry_addr.sin_family=AF_INET;
-	entry_addr.sin_port=ENTRY_PORT+id;
+	entry_addr.sin_port=htons(ENTRY_PORT+*id);
 	inet_aton(ENTRY_IP,&entry_addr.sin_addr);
 
-	if ( connect(entry_fd,(struct sockaddr*)&entry_addr,sizeof(entry_addr)) <0 ){
-		printf("connect error at thread %d\n",id);
+	if ( connect(entry_fd[*id],(struct sockaddr*)&entry_addr,sizeof(entry_addr)) <0 ){
+		printf("connect error at thread %d\n",*id);
 		return;
 	}
 
+	while (1){
+		recv(entry_fd[*id],&streamid,sizeof(uint32_t),0);
+		recv(entry_fd[*id],&payload_len,sizeof(uint32_t),0);
+		ptr=info_search(&thread_head[*id],streamid);
+		if (payload_len==0){
+			close(ptr->browser_fd);
+			info_delete(&thread_head[*id],ptr);
+			continue;
+		}
+		recv(entry_fd[*id],buff,payload_len*sizeof(char),0);
+		send(ptr->browser_fd,buff,payload_len*sizeof(char),0);
+	}
+	return;
 }
+
