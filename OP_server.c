@@ -39,7 +39,7 @@ typedef struct conn_info{
 	uint32_t thread_id;
 }CONN_INFO;
 
-CONN_INFO thread_head[THREAD_NUM];
+CONN_INFO*thread_head[THREAD_NUM];
 
 uint32_t streamid_master=0;
 int entry_fd[THREAD_NUM];
@@ -280,6 +280,7 @@ void Servlet(SSL* ssl)	/* Serve the connection -- threadable */
 
 static void browser_connect_to_proxy(struct ev_loop*loop,struct ev_io*watcher,int revents)
 {
+	printf("into browser_connect_to_proxy\n");
 	int browser_fd  , connect_tag;
 	uint32_t streamid ,payload_len;
 	struct sockaddr_in browser_addr , entry_addr;
@@ -310,7 +311,7 @@ static void browser_connect_to_proxy(struct ev_loop*loop,struct ev_io*watcher,in
 	connect_tag=connection_distribute(streamid);
 	//-----send outside addr to exit node-----
 	CONN_INFO*info=info_init(browser_fd,streamid,connect_tag);
-	info_insert(&thread_head[connect_tag],info);
+	info_insert(thread_head[connect_tag],info);
 
 	send(entry_fd[connect_tag],&streamid,sizeof(uint32_t),0);		//-----stream id-----
 	send(entry_fd[connect_tag],&payload_len,sizeof(uint32_t),0);		//-----offset-----
@@ -327,6 +328,7 @@ char*getOutsideAddr(int browser_fd)
 {
 	//-----set the socket option first-----
 	struct timeval time_opt={0};
+	struct sockaddr_in outside_addr;
 	int option=1 , hostname_len;
 	char buff[MAXBUFF];
 	char *return_str=(char*)malloc(7*sizeof(char));
@@ -353,12 +355,14 @@ if ( (setsockopt(browser_fd,SOL_SOCKET,SO_RCVTIMEO,(char*)&time_opt,sizeof(time_
 	}
 
 	//-----socket auth , step two-----
+	outside_addr.sin_family=AF_INET;
+
 	if ( recv(browser_fd,buff,4,0)==-1){
 		sock_auth_fail(2,0);
 		return NULL;
 	}
-	if (buff[0]==5	//socket5
-			||buff[1]==1){	//CONNECT
+	if (buff[0]!=5	//socket5
+			||buff[1]!=1){	//CONNECT
 		buff[0]=5;
 		buff[1]=7;	//connection not support
 		buff[2]=0;	//end
@@ -423,6 +427,7 @@ if ( (setsockopt(browser_fd,SOL_SOCKET,SO_RCVTIMEO,(char*)&time_opt,sizeof(time_
 		}
 	}
 	return_str[6]=0;
+
 	return return_str;
 }
 
@@ -445,6 +450,7 @@ uint32_t connection_distribute(uint32_t streamid)
 
 static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 {
+	printf("into read_browser\n");
 	char buff[MAXBUFF];
 	ssize_t result;
 	uint32_t len;
@@ -462,7 +468,7 @@ static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 		ev_io_stop(my_loop,watcher);
 		if (watcher->fd)
 			close(watcher->fd);
-		info_delete(&thread_head[info->thread_id],info);
+		info_delete(thread_head[info->thread_id],info);
 		free(watcher);
 	}
 	else{  //-----normal receive packet from browser-----
@@ -554,17 +560,21 @@ void thread_func(int*id)
 		printf("connect error at thread %d\n",*id);
 		return;
 	}
-
+	
 	while (1){
 		recv(entry_fd[*id],&streamid,sizeof(uint32_t),0);
+		printf("stream id = %d\n",streamid);
 		recv(entry_fd[*id],&payload_len,sizeof(uint32_t),0);
-		ptr=info_search(&thread_head[*id],streamid);
+		printf("payload length = %d\n",payload_len);
+		ptr=info_search(thread_head[*id],streamid);
 		if (payload_len==0){
 			close(ptr->browser_fd);
-			info_delete(&thread_head[*id],ptr);
+			info_delete(thread_head[*id],ptr);
 			continue;
 		}
 		recv(entry_fd[*id],buff,payload_len*sizeof(char),0);
+		printf("buff : ");
+		write(STDOUT_FILENO, buff,payload_len*sizeof(char));
 		send(ptr->browser_fd,buff,payload_len*sizeof(char),0);
 	}
 	return;
