@@ -341,7 +341,8 @@ int connect_init(char*outside)
 	client_addr.sin_family=AF_INET;
 	client_addr.sin_port=htons( port  );
 	memcpy(&client_addr.sin_addr.s_addr,outside,4);
-
+	
+	printf("connect to %s:%d\n",inet_ntoa(client_addr.sin_addr),client_addr.sin_port);
 
 	if ( (client_fd=socket(AF_INET,SOCK_STREAM,0))  <0   ){
 		printf("client socket initial error\n");

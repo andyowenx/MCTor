@@ -32,7 +32,7 @@ int main()
 
 	for (i=0;i<THREAD_NUM;i++){
 		conn_info[i].fd=server_init(i);
-		conn_info[i].port=PORT_BEGIN+i;
+		conn_info[i].port=MIDDLE_PORT+i;
 		pthread_create(&thread[i],NULL,(void*)thread_func,(void*)&conn_info[i]);
 	}
 	for (i=0;i<THREAD_NUM;i++)
@@ -53,7 +53,7 @@ int server_init(int port)
 
 	bzero((char*)&addr,sizeof(addr));
 	addr.sin_family=AF_INET;
-	addr.sin_port=PORT_BEGIN+port;
+	addr.sin_port=ENTRY_PORT+port;
 	addr.sin_addr.s_addr=INADDR_ANY;
 	
 	if ( bind(fd,(struct sockaddr*)&addr,sizeof(addr)) <0  ){
