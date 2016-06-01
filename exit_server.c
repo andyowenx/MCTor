@@ -24,7 +24,7 @@ typedef struct conn_info{
     uint32_t thread_id;
 }CONN_INFO;
 
-CONN_INFO*thread_head[THREAD_NUM];
+CONN_INFO thread_head[THREAD_NUM];
 
 uint32_t streamid_master=0;
 int exit_fd[THREAD_NUM];
@@ -66,7 +66,10 @@ int main()
     for (i=0;i<THREAD_NUM;i++){
 	thread_id[i]=i;
 	thread_loop[i]=NULL;
-	thread_head[i]=NULL;
+	thread_head[i].browser_fd=-1;
+	thread_head[i].streamid=-1;
+	thread_head[i].thread_id=-1;
+	thread_head[i].next=NULL;
 	pthread_create(&thread[i],NULL,(void*)thread_func,(void*)&thread_id[i]);
     }
 
@@ -261,7 +264,7 @@ static void read_outside(struct ev_loop*loop,struct ev_io*watcher,int revents)
 	ev_io_stop(thread_loop[info->thread_id],watcher);
 	if (watcher->fd)
 	    close(watcher->fd);
-	info_delete(thread_head[info->thread_id],info);
+	info_delete(&thread_head[info->thread_id],info);
 	free(watcher);
     }
     else{  //-----normal receive packet from browser-----
@@ -427,17 +430,16 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
     struct sockaddr_in middle_addr;
 
     if ( recv(middle_fd,&streamid,sizeof(uint32_t),0) >0 ){
-	ptr=info_search(thread_head[*id],streamid);
+	ptr=info_search(&thread_head[*id],streamid);
 	//-----new connection incoming-----
 	if (ptr==NULL){
 	    ptr=info_init(-1,streamid,*id);
-	    info_insert(thread_head[*id],ptr);
 	    recv(middle_fd,&payload_len,sizeof(uint32_t),0);
 	    recv(middle_fd,buff,payload_len*sizeof(char),0);
 	    ptr->browser_fd=connect_init(buff,middle_fd,streamid);
 
 	    if (ptr->browser_fd==-1){
-		info_delete(thread_head[*id],ptr);
+		free(ptr);
 
 		send(middle_fd,&streamid,sizeof(streamid),0);
 		payload_len=10;
@@ -447,6 +449,7 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
 		printf("connect error , drop connection\n");
 		return;
 	    }
+	    info_insert(&thread_head[*id],ptr);
 
 	    outside_watcher=(struct ev_io*)malloc(sizeof(struct ev_io));
 	    outside_watcher->data=(void*)ptr;

@@ -39,7 +39,7 @@ typedef struct conn_info{
 	uint32_t thread_id;
 }CONN_INFO;
 
-CONN_INFO*thread_head[THREAD_NUM];
+CONN_INFO thread_head[THREAD_NUM];
 
 uint32_t streamid_master=0;
 int entry_fd[THREAD_NUM];
@@ -85,6 +85,10 @@ int main()
 
 	for (i=0;i<THREAD_NUM;i++){
 		thread_id[i]=i;
+		thread_head[i].browser_fd=-1;
+		thread_head[i].streamid=-1;
+		thread_head[i].thread_id=-1;
+		thread_head[i].next=NULL;
 		pthread_create(&thread[i],NULL,(void*)thread_func,(void*)&thread_id[i]);
 	}
 
@@ -311,7 +315,7 @@ static void browser_connect_to_proxy(struct ev_loop*loop,struct ev_io*watcher,in
 	connect_tag=connection_distribute(streamid);
 	//-----send outside addr to exit node-----
 	CONN_INFO*info=info_init(browser_fd,streamid,connect_tag);
-	info_insert(thread_head[connect_tag],info);
+	info_insert(&thread_head[connect_tag],info);
 
 	send(entry_fd[connect_tag],&streamid,sizeof(uint32_t),0);		//-----stream id-----
 	send(entry_fd[connect_tag],&payload_len,sizeof(uint32_t),0);		//-----offset-----
@@ -468,7 +472,7 @@ static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 		ev_io_stop(my_loop,watcher);
 		if (watcher->fd)
 			close(watcher->fd);
-		info_delete(thread_head[info->thread_id],info);
+		info_delete(&thread_head[info->thread_id],info);
 		free(watcher);
 	}
 	else{  //-----normal receive packet from browser-----
@@ -491,11 +495,6 @@ CONN_INFO*info_init(int browser_fd,int streamid,int thread_id)
 void info_insert(CONN_INFO*head,CONN_INFO*tag)
 {
 	CONN_INFO*walker;
-	if (head==NULL){
-		head=tag;
-		tag->next=NULL;
-		return;
-	}
 
 	for (walker=head;walker->next!=NULL;walker=walker->next)//-----get the last node-----
 		;
@@ -509,12 +508,6 @@ void info_delete(CONN_INFO*head,CONN_INFO*tag)
 {
 	CONN_INFO*walker,*prev;
 	int tag_streamid=tag->streamid;
-	if (head->streamid==tag_streamid){
-		prev=head;
-		head=head->next;
-		free(prev);
-		return;
-	}
 
 	for (walker=head->next,prev=head;walker!=NULL;walker=walker->next){
 		if (walker->streamid==tag_streamid){
@@ -566,10 +559,10 @@ void thread_func(int*id)
 		printf("stream id = %d\n",streamid);
 		recv(entry_fd[*id],&payload_len,sizeof(uint32_t),0);
 		printf("payload length = %d\n",payload_len);
-		ptr=info_search(thread_head[*id],streamid);
+		ptr=info_search(&thread_head[*id],streamid);
 		if (payload_len==0){
 			close(ptr->browser_fd);
-			info_delete(thread_head[*id],ptr);
+			info_delete(&thread_head[*id],ptr);
 			continue;
 		}
 		recv(entry_fd[*id],buff,payload_len*sizeof(char),0);
