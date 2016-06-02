@@ -268,9 +268,10 @@ static void read_outside(struct ev_loop*loop,struct ev_io*watcher,int revents)
     //-----end of connection-----
     if (result<=0){
 	ev_io_stop(thread_loop[info->thread_id],watcher);
+	info_delete(&thread_head[info->thread_id],info);
 	if (watcher->fd)
 	    close(watcher->fd);
-	info_delete(&thread_head[info->thread_id],info);
+	free(watcher);
     }
     else{  //-----normal receive packet from browser-----
 	printf("send to middle stream id= %d , len = %d\n",info->streamid,len);
@@ -372,7 +373,7 @@ int connect_init(char*outside, int middle_fd,int streamid)
 	printf("connect error at client_init , %s\n",strerror(errno));
 	return -1;
     }
-    
+
     //-----reply outside addr info to browser-----
     payload_len=10;
     //client_len=sizeof(client_addr);
@@ -428,7 +429,7 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
     CONN_INFO*ptr;
     int*id=(int*)watcher->data;
     struct ev_io *outside_watcher;
-    int middle_fd=watcher->fd  , temp;
+    int middle_fd=watcher->fd  , temp , receive_num;
     struct sockaddr_in middle_addr;
 
     if ( recv(middle_fd,&streamid,sizeof(uint32_t),0) >0 ){
@@ -437,7 +438,13 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
 	if (ptr==NULL){
 	    ptr=info_init(-1,streamid,*id,middle_fd);
 	    recv(middle_fd,&payload_len,sizeof(uint32_t),0);
-	    recv(middle_fd,buff,payload_len*sizeof(char),0);
+
+	    for (receive_num=0;receive_num<payload_len;){
+		temp=recv(middle_fd,buff+receive_num,(payload_len-receive_num)*sizeof(char),0);
+		receive_num+=temp;
+	    }
+
+
 	    ptr->browser_fd=connect_init(buff,middle_fd,streamid);
 
 	    if (ptr->browser_fd==-1){
@@ -466,10 +473,13 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
 	}
 
 	recv(middle_fd,&payload_len,sizeof(uint32_t),0);
-	recv(middle_fd,buff,payload_len*sizeof(char),0);
+	for (receive_num=0;receive_num<payload_len;){
+	    temp=recv(middle_fd,buff+receive_num,(payload_len-receive_num)*sizeof(char),0);
+	    receive_num+=temp;
+	}
 	printf("recv from middle , stream id : %d , len : %d\n",streamid,payload_len);
 	if (payload_len==0){
-	    send(ptr->browser_fd,buff,0,0);
+	    close(ptr->browser_fd);
 	    return;
 	}
 	send(ptr->browser_fd,buff,payload_len*sizeof(char),0);	
