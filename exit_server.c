@@ -23,9 +23,10 @@ typedef struct conn_info{
     uint32_t streamid;
     uint32_t thread_id;
     int middle_fd;
+    struct ev_io*watcher;
 }CONN_INFO;
 
-pthread_mutex_t lock;
+//pthread_mutex_t lock;
 CONN_INFO thread_head[THREAD_NUM];
 
 uint32_t streamid_master=0;
@@ -58,11 +59,11 @@ int main()
        printf("pthread mutex fail\n");
        exit(1);
        }
-     */
     if (pthread_mutex_init(&lock,NULL)!=0){
 	printf("mutex lock init error\n");
 	exit(1);
     }
+    */
     signal(SIGPIPE,SIG_IGN);
     struct ev_io fd;
     pthread_t thread[THREAD_NUM];
@@ -149,7 +150,7 @@ int server_init(int port)
 	exit(1);
     }
 
-    listen(server_fd,10);
+    listen(server_fd,5000);
     return server_fd;
 }
 
@@ -262,22 +263,26 @@ static void read_outside(struct ev_loop*loop,struct ev_io*watcher,int revents)
     }
 
     CONN_INFO*info=(CONN_INFO*)watcher->data;
-    result=recv(watcher->fd,buff,MAXBUFF,0);
+
+    //-----the first eight bytes are stream id and payload length
+    result=recv(watcher->fd,buff+8,MAXBUFF,0);
 
     len=result;
+    
+    memcpy(buff,&(info->streamid),4);
+    memcpy(buff+4,&len,4);
+
     //-----end of connection-----
     if (result<=0){
-	ev_io_stop(thread_loop[info->thread_id],watcher);
+	//ev_io_stop(thread_loop[info->thread_id],watcher);
 	info_delete(&thread_head[info->thread_id],info);
-	if (watcher->fd)
-	    close(watcher->fd);
-	free(watcher);
+	//if (watcher->fd)
+	//    close(watcher->fd);
+	//free(watcher);
     }
     else{  //-----normal receive packet from browser-----
 	printf("send to middle stream id= %d , len = %d\n",info->streamid,len);
-	send(info->middle_fd,&(info->streamid),sizeof(uint32_t),0);		//-----stream id-----
-	send(info->middle_fd,&len,sizeof(uint32_t),0);		//-----offset-----
-	send(info->middle_fd,buff,len*sizeof(char),0);	//-----payload-----
+	send(info->middle_fd,buff, (sizeof(uint32_t)*2)      +  (len*sizeof(char))        ,0);
     }
 }
 
@@ -289,12 +294,13 @@ CONN_INFO*info_init(int browser_fd,int streamid,int thread_id,int middle_fd)
     info->streamid=streamid;
     info->thread_id=thread_id;
     info->middle_fd=middle_fd;
+    info->watcher=NULL;
     return info;
 }
 
 void info_insert(CONN_INFO*head,CONN_INFO*tag)
 {
-    pthread_mutex_lock(&lock);
+    //pthread_mutex_lock(&lock);
     CONN_INFO*walker;
 
     for (walker=head;walker->next!=NULL;walker=walker->next)//-----get the last node-----
@@ -302,24 +308,27 @@ void info_insert(CONN_INFO*head,CONN_INFO*tag)
 
     walker->next=tag;
     tag->next=NULL;
-    pthread_mutex_unlock(&lock);
+    //pthread_mutex_unlock(&lock);
     return;
 }
 void info_delete(CONN_INFO*head,CONN_INFO*tag)
 {
-    pthread_mutex_lock(&lock);
+    //pthread_mutex_lock(&lock);
     CONN_INFO*walker,*prev;
     int tag_streamid=tag->streamid;
 
     for (walker=head->next,prev=head;walker!=NULL;walker=walker->next){
 	if (walker->streamid==tag_streamid){
 	    prev->next=walker->next;
+	    ev_io_stop(thread_loop[walker->thread_id],walker->watcher);
+	    free(walker->watcher);
+	    close(walker->browser_fd);
 	    free(walker);
 	    return;
 	}
 	prev=walker;
     }
-    pthread_mutex_unlock(&lock);
+    //pthread_mutex_unlock(&lock);
 }
 CONN_INFO*info_search(CONN_INFO*head,int streamid)
 {
@@ -380,13 +389,14 @@ int connect_init(char*outside, int middle_fd,int streamid)
     //if ( getpeername(client_fd,(struct sockaddr*)&client_addr, (socklen_t*)&client_len) <0 ){
     //	printf("getpeername error at client_init\n");
     //}
+    
+    memcpy(buff,&streamid,4);
+    memcpy(buff+4,&payload_len,4);
 
-    send(middle_fd,&streamid,sizeof(streamid),0);
-    send(middle_fd,&payload_len,sizeof(payload_len),0);
-    memcpy(buff, "\x05\x00\x00\x01", 4);                                                                                                                                       
-    memcpy(buff + 4, &(client_addr.sin_addr.s_addr), 4);
-    memcpy(buff + 8, &(client_addr.sin_port), 2);
-    send(middle_fd,buff,payload_len*sizeof(char),0);
+    memcpy(buff+8, "\x05\x00\x00\x01", 4);                                  
+    memcpy(buff + 12, &(client_addr.sin_addr.s_addr), 4);
+    memcpy(buff + 16, &(client_addr.sin_port), 2);
+    send(middle_fd,buff,  (sizeof(uint32_t)*2)    +    (payload_len*sizeof(char))  ,0);
 
 
     return client_fd;
@@ -427,7 +437,7 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
     uint32_t streamid , payload_len;
     char buff[MAXBUFF];
     CONN_INFO*ptr;
-    int*id=(int*)watcher->data;
+    int*id=(int*)watcher->data ,i;
     struct ev_io *outside_watcher;
     int middle_fd=watcher->fd  , temp , receive_num;
     struct sockaddr_in middle_addr;
@@ -438,10 +448,18 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
 	if (ptr==NULL){
 	    ptr=info_init(-1,streamid,*id,middle_fd);
 	    recv(middle_fd,&payload_len,sizeof(uint32_t),0);
-
-	    for (receive_num=0;receive_num<payload_len;){
+	    
+	    if (payload_len<0){
+		printf("recv payload_len < 0 at handle_from_middle and it is a new connection , drop it\n");
+		return;
+	    }
+	    for (i=0,receive_num=0;receive_num<payload_len;i++){
 		temp=recv(middle_fd,buff+receive_num,(payload_len-receive_num)*sizeof(char),0);
 		receive_num+=temp;
+		if (i>10){
+		    printf("too many times at handle_from_middle\n");
+		    break;
+		}
 	    }
 
 
@@ -449,12 +467,14 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
 
 	    if (ptr->browser_fd==-1){
 		free(ptr);
-
-		send(middle_fd,&streamid,sizeof(streamid),0);
+		
 		payload_len=10;
-		send(middle_fd,&payload_len,sizeof(payload_len),0);
-		memcpy(buff,"\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00", 10); //-----connect error message back to browser-----
-		send(middle_fd,buff,payload_len*sizeof(char),0);
+
+		memcpy(buff,&streamid,4);
+		memcpy(buff+4,&payload_len,4);
+		memcpy(buff+8,"\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00",10);
+
+		send(middle_fd,buff, (sizeof(uint32_t)*2) +  (payload_len*sizeof(char)),0);
 		printf("connect error , drop connection\n");
 		return;
 	    }
@@ -462,26 +482,32 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
 
 	    outside_watcher=(struct ev_io*)malloc(sizeof(struct ev_io));
 	    outside_watcher->data=(void*)ptr;
-
-	    //temp=ptr->browser_fd;
-	    //ptr->browser_fd=middle_fd;
-
+	    
+	    //-----part of initial ev_io-----
+	    ptr->watcher=outside_watcher;
 
 	    ev_io_init(outside_watcher, read_outside ,ptr->browser_fd , EV_READ);
 	    ev_io_start(thread_loop[*id],outside_watcher);
 	    return;
 	}
-
+	
 	recv(middle_fd,&payload_len,sizeof(uint32_t),0);
+	
+	if (payload_len < 0){
+	    printf("recv payload_len < 0 at handle_from_middle , disconnect\n");
+	    info_delete(&thread_head[*id],ptr);
+	    return;
+	}
+
 	for (receive_num=0;receive_num<payload_len;){
 	    temp=recv(middle_fd,buff+receive_num,(payload_len-receive_num)*sizeof(char),0);
 	    receive_num+=temp;
 	}
 	printf("recv from middle , stream id : %d , len : %d\n",streamid,payload_len);
-	if (payload_len==0){
+	send(ptr->browser_fd,buff,payload_len*sizeof(char),0);	
+	/*if (payload_len==0){
 	    close(ptr->browser_fd);
 	    return;
-	}
-	send(ptr->browser_fd,buff,payload_len*sizeof(char),0);	
+	}*/
     }
 }
