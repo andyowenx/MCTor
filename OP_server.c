@@ -35,8 +35,9 @@
 typedef struct conn_info{
 	struct conn_info*next;
 	int browser_fd;
-	int streamid;
+	uint32_t streamid;
 	uint32_t thread_id;
+	struct ev_io*watcher;
 }CONN_INFO;
 
 CONN_INFO thread_head[THREAD_NUM];
@@ -67,6 +68,9 @@ CONN_INFO*info_init(int browser_fd,int streamid,int thread_id);
 void info_insert(CONN_INFO*head,CONN_INFO*tag);
 void info_delete(CONN_INFO*head,CONN_INFO*tag);
 CONN_INFO*info_search(CONN_INFO*head,int streamid);
+
+void recv_send_print(int result,int send_or_recv,char func[]);
+
 
 int main()
 {
@@ -186,7 +190,7 @@ int server_init()
 		exit(1);
 	}
 
-	listen(server_fd,10);
+	listen(server_fd,5000);
 	return server_fd;
 }
 
@@ -289,12 +293,13 @@ void Servlet(SSL* ssl)	/* Serve the connection -- threadable */
 
 static void browser_connect_to_proxy(struct ev_loop*loop,struct ev_io*watcher,int revents)
 {
+	printf("into browser_connect_to_proxy\n");
 	int browser_fd  , connect_tag;
 	uint32_t streamid ,payload_len;
 	struct sockaddr_in browser_addr , entry_addr;
-	int browser_len=sizeof(browser_addr);
+	int browser_len=sizeof(browser_addr)  ,result;
 	char *outside;
-	char payload[MAXBUFF];
+	char buff[MAXBUFF];
 	struct ev_io*browser_watcher;
 
 	if (revents&EV_ERROR){
@@ -314,19 +319,26 @@ static void browser_connect_to_proxy(struct ev_loop*loop,struct ev_io*watcher,in
 		return;
 	}
 
-	payload_len=7;
+
+	payload_len=6;
 	streamid=get_stream_id();
 	connect_tag=connection_distribute(streamid);
 	//-----send outside addr to exit node-----
 	CONN_INFO*info=info_init(browser_fd,streamid,connect_tag);
 	info_insert(&thread_head[connect_tag],info);
 
-	send(entry_fd[connect_tag],&streamid,sizeof(uint32_t),0);		//-----stream id-----
-	send(entry_fd[connect_tag],&payload_len,sizeof(uint32_t),0);		//-----offset-----
-	send(entry_fd[connect_tag],outside,payload_len*sizeof(char),0);	//-----payload-----
+	memcpy(buff,&streamid,4);
+	memcpy(buff+4,&payload_len,4);
+	memcpy(buff+8,outside,6);
+
+	result=send(entry_fd[connect_tag],buff, (sizeof(uint32_t)*2) +   (payload_len*sizeof(char))  ,0);	//-----payload-----
+	recv_send_print(result,1,"browser_connect_to_proxy");
+
+	free(outside);
 
 	browser_watcher=(struct ev_io*)malloc(sizeof(struct ev_io));
 	browser_watcher->data=(void*)info;
+	info->watcher=browser_watcher;
 	ev_io_init(browser_watcher, read_browser, browser_fd,EV_READ);
 	ev_io_start(my_loop,browser_watcher);
 }
@@ -337,11 +349,16 @@ char*getOutsideAddr(int browser_fd)
 	//-----set the socket option first-----
 	struct timeval time_opt={0};
 	struct sockaddr_in outside_addr;
-	int option=1 , hostname_len;
+	int option=1 , hostname_len ,result;
 	char buff[MAXBUFF];
 	char *return_str=(char*)malloc(7*sizeof(char));
 	time_opt.tv_sec=2;
 	time_opt.tv_usec=0;
+
+#ifdef SO_NOSIGPIPE                                                                                             
+	setsockopt(browser_fd, SOL_SOCKET, SO_NOSIGPIPE, &option, sizeof(option));
+#endif
+
 
 	if ( (setsockopt(browser_fd,SOL_SOCKET,SO_RCVTIMEO,(char*)&time_opt,sizeof(time_opt))  == -1)
 			|| (    setsockopt(browser_fd,SOL_SOCKET,SO_SNDTIMEO,(char*)&time_opt,sizeof(time_opt))  ==-1)  ){
@@ -383,13 +400,15 @@ char*getOutsideAddr(int browser_fd)
 			return NULL;
 		}
 		memcpy(return_str,buff,4);
+		memcpy(&outside_addr.sin_addr.s_addr,buff,4);
 		if (  recv(browser_fd,buff,2,0) ==-1){
 			sock_auth_fail(2,0);
 			return NULL;
 		}
 		memcpy(return_str+4,buff,2);
+		memcpy(&outside_addr.sin_port,buff,2);
 
-		//printf("outside addr :  %s:%d\n",inet_ntoa(outside_addr->sin_addr),htons(outside_addr->sin_port));
+		printf("outside addr :  %s:%d\n",inet_ntoa(outside_addr.sin_addr),ntohs(outside_addr.sin_port));
 	}
 	else if (buff[3]==3){ //-----query with domain name-----
 		struct hostent *hp;
@@ -467,22 +486,32 @@ static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 	}
 
 	CONN_INFO*info=(CONN_INFO*)watcher->data;
-	result=recv(watcher->fd,buff,MAXBUFF,0);
+
+
+	//-----the first eight byte is stream id and payload length-----
+	result=recv(watcher->fd,buff+8,MAXBUFF,0);
+
+
+	recv_send_print(result,0,"read_browser");
 
 	len=result;
+
+	memcpy(buff,& (info->streamid),4);
+	memcpy(buff+4,&len,4);
+
 	//-----end of connection-----
 	if (result<=0){
-		ev_io_stop(my_loop,watcher);
+		printf("close fd=%d , streamid=%d\n",info->browser_fd,info->streamid);
+		//ev_io_stop(my_loop,watcher);
 		info_delete(&thread_head[info->thread_id],info);
-		if (watcher->fd)
-			close(watcher->fd);
-		free(watcher);
+		//if (watcher->fd)
+		//	close(watcher->fd);
+		//free(watcher);
 	}
 	else{  //-----normal receive packet from browser-----
-		printf("send to stream id : %d , len = %d\n",info->streamid,len);
-		send(entry_fd[info->thread_id],&(info->streamid),sizeof(uint32_t),0);		//-----stream id-----
-		send(entry_fd[info->thread_id],&len,sizeof(uint32_t),0);		//-----offset-----
-		send(entry_fd[info->thread_id],buff,len*sizeof(char),0);	//-----payload-----
+		//printf("send to stream id : %d , len = %d\n",info->streamid,len);
+		result=send(entry_fd[info->thread_id],buff,  (sizeof(uint32_t)*2)  +  (len*sizeof(char))  ,0);
+		recv_send_print(result,1,"read_browser");
 	}
 }
 
@@ -493,12 +522,13 @@ CONN_INFO*info_init(int browser_fd,int streamid,int thread_id)
 	info->browser_fd=browser_fd;
 	info->streamid=streamid;
 	info->thread_id=thread_id;
+	info->watcher=NULL;
 	return info;
 }
 
 void info_insert(CONN_INFO*head,CONN_INFO*tag)
 {	
-	pthread_mutex_lock(&lock);
+	//pthread_mutex_lock(&lock);
 	CONN_INFO*walker;
 
 	for (walker=head;walker->next!=NULL;walker=walker->next)//-----get the last node-----
@@ -506,25 +536,28 @@ void info_insert(CONN_INFO*head,CONN_INFO*tag)
 
 	walker->next=tag;
 	tag->next=NULL;
-	pthread_mutex_unlock(&lock);
+	//pthread_mutex_unlock(&lock);
 
 	return;
 }
 void info_delete(CONN_INFO*head,CONN_INFO*tag)
 {
-	pthread_mutex_lock(&lock);
+	//pthread_mutex_lock(&lock);
 	CONN_INFO*walker,*prev;
 	int tag_streamid=tag->streamid;
 
 	for (walker=head->next,prev=head;walker!=NULL;walker=walker->next){
 		if (walker->streamid==tag_streamid){
 			prev->next=walker->next;
+			ev_io_stop(my_loop,walker->watcher);
+			free(walker->watcher);
+			close(walker->browser_fd);
 			free(walker);
 			return;
 		}
 		prev=walker;
 	}
-	pthread_mutex_unlock(&lock);
+	//pthread_mutex_unlock(&lock);
 }
 CONN_INFO*info_search(CONN_INFO*head,int streamid)
 {
@@ -545,7 +578,7 @@ void thread_func(int*id)
 	struct ev_io*entry_watcher,*browser_watcher;
 	uint32_t streamid , payload_len;
 	char buff[MAXBUFF], bigbuff[8192];
-	int i,receive_num,temp;
+	int i,receive_num,temp, result;
 	CONN_INFO*ptr;
 
 	if ( (entry_fd[*id]=socket(AF_INET,SOCK_STREAM,0)) <0 ){
@@ -565,35 +598,73 @@ void thread_func(int*id)
 	//static int cnt = 0;
 	while (1){
 		/*
-		if (cnt == 1) {
-			num = recv(entry_fd[*id],bigbuff,8192,0);
-			int j;	
+		   if (cnt == 1) {
+		   num = recv(entry_fd[*id],bigbuff,8192,0);
+		   int j;	
 
-			for (j = 0; j < num; j++) {
-			 	if (j % 8 == 0) printf("\nbigbuff %d:", j);
-			 	printf("%02x ", bigbuff[j]);
-			}
-	    }
-		cnt++;
-		*/
-		recv(entry_fd[*id],&streamid,sizeof(uint32_t),0);
-		recv(entry_fd[*id],&payload_len,sizeof(uint32_t),0);
-		printf("recv from entry , stream id : %d , len : %d\n",streamid,payload_len);
-		ptr=info_search(&thread_head[*id],streamid);
-		if (payload_len==0){
-			close(ptr->browser_fd);
+		   for (j = 0; j < num; j++) {
+		   if (j % 8 == 0) printf("\nbigbuff %d:", j);
+		   printf("%02x ", bigbuff[j]);
+		   }
+		   }
+		   cnt++;
+		 */
+		result=recv(entry_fd[*id],&streamid,sizeof(uint32_t),0);
+		recv_send_print(result,0,"thread_func");
+		result=recv(entry_fd[*id],&payload_len,sizeof(uint32_t),0);
+		recv_send_print(result,0,"thread_func");
+		if(payload_len < 0 || payload_len>2048 ){
+			//printf("recv EOF from entry , close streamid=%d\n",streamid);
+			//info_delete(&thread_head[*id],info_search(&thread_head[*id],streamid));
+			printf("recv error here ,streamid=%d  , payload_len=%d\n",streamid,payload_len);
 			continue;
 		}
-		for (receive_num=0;receive_num<payload_len;){
-			temp=recv(entry_fd[*id],buff+receive_num,(payload_len-receive_num)*sizeof(char),0);
-			receive_num+=temp;
-		}
+		//printf("recv from entry , stream id : %d , len : %d\n",streamid,payload_len);
+		ptr=info_search(&thread_head[*id],streamid);
+
+
 		if (ptr==NULL){
 			printf("cannot find ptr which streamid is %d\n",streamid);
+			if (payload_len <=2048 && payload_len >=0 ){
+				for (i=0,receive_num=0;receive_num<payload_len;i++){
+					if(i>10){
+						printf("too much loop at receive_num loop\n");
+						break;
+					}
+					temp=recv(entry_fd[*id],buff+receive_num,(payload_len-receive_num)*sizeof(char),0);
+					receive_num+=temp;
+					//printf("recv %d len from buff\n",temp);
+				}
+			}
 			continue;
 		}
-		send(ptr->browser_fd,buff,payload_len*sizeof(char),0);
+
+
+		for (i=0,receive_num=0;receive_num<payload_len  &&payload_len< 2049;i++){
+			if(i>10){
+				printf("too much loop at receive_num loop\n");
+				break;
+			}
+			temp=recv(entry_fd[*id],buff+receive_num,(payload_len-receive_num)*sizeof(char),0);
+			receive_num+=temp;
+			//printf("recv %d len for buff\n",temp);
+		}
+		result=send(ptr->browser_fd,buff,receive_num*sizeof(char),0);
+		recv_send_print(result,1,"thread_func");
 	}
 	return;
 }
 
+void recv_send_print(int result,int send_or_recv,char func[])
+{
+	char type[20];
+	if (send_or_recv==0)
+		strcpy(type,"recv");
+	else
+		strcpy(type,"send");
+
+	if (result==0)
+		printf("%s EOF , func=%s  , error message : %s\n",type,func,strerror(errno));
+	else if (result<0)
+		printf("%s error, func=%s , error message : %s\n",type,func,strerror(errno));
+}
