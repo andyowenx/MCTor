@@ -2,10 +2,14 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <ev.h>
-#include <netinet.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include "hidden_info.h"
 #include <signal.h>
+#include <fcntl.h>
+#include <string.h>
+#include <errno.h>
+#include <netdb.h>
 
 #define debug 1
 
@@ -41,13 +45,15 @@ typedef struct {
 
 
 struct ev_loop *my_loop=NULL;
+CONN_INFO info_head[THREAD_NUM];
 uint32_t streamid_master=0;
-
+int entry_fd[THREAD_NUM];
 
 int server_init(int port);
 void error_report(int kind,int num,int browser_fd);
 uint32_t get_streamid(void);
 uint32_t connection_distribute(uint32_t streamid);
+void my_send(int fd,char*buff,int size,char func_name[]);
 
 static void init_from_browser(struct ev_loop*loop,struct ev_io*watcher,int revents);
 static void handle_from_browser(struct ev_loop*loop,struct ev_io*watcher,int revents);
@@ -61,18 +67,20 @@ CONN_INFO*info_search(CONN_INFO*head,int streamid);
 
 int main()
 {
-	int server_fd[THREAD_NUM];
-	int i , entry_fd[THREAD_NUM];
-	struct sockaddr_in entry_addr[i];
-	struct ev_io browser_watcher,entry_watcher[THREAD_NUM];
-
 	signal(SIGPIPE,SIG_IGN);
+
+	int server_fd;
+	int i;
+	struct ev_io browser_watcher,entry_watcher[THREAD_NUM];
+	struct sockaddr_in entry_addr[i];
+
+	server_fd=server_init(OP_PORT);
+
 	my_loop=ev_default_loop(0);
 
-	server_fd[i]=server_init(OP_PORT);
 
 	for (i=0;i<THREAD_NUM;i++){
-		bzero(&entry_addr[i],sizeof(entry_addr[i]));
+		bzero((char*)&entry_addr[i],sizeof(entry_addr[i]));
 		if ( (entry_fd[i]=socket(AF_INET,SOCK_STREAM,0)) <0  ){
 			printf("entry socket open error\n");
 			exit(1);
@@ -85,7 +93,16 @@ int main()
 			printf("connect to entry error\n");
 			exit(1);
 		}
-		ev_init(&entry_watcher[i],handle_from_entry,entry_fd[i],EV_READ);
+
+		info_head[i].streamid=-1;
+		info_head[i].thread_id=i;
+		info_head[i].browser_fd=-1;
+		info_head[i].next=NULL;
+		info_head[i].watcher=NULL;
+		
+		entry_watcher->data=(void*)&info_head[i];
+
+		ev_io_init(&entry_watcher[i],handle_from_entry,entry_fd[i],EV_READ);
 		ev_io_start(my_loop,&entry_watcher[i]);
 	}
 
@@ -143,9 +160,6 @@ int server_init(int port)
 
 static void init_from_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 {
-#ifdef debug
-	printf("into init_from_browser\n");
-#endif
 
 	if (revents&EV_ERROR){
 		printf("revent error at init_from_browser\n");
@@ -177,11 +191,11 @@ static void init_from_browser(struct ev_loop*loop,struct ev_io*watcher,int reven
 	if ( (setsockopt(browser_fd,SOL_SOCKET,SO_RCVTIMEO,(char*)&time_opt,sizeof(time_opt))  == -1)
 			|| (    setsockopt(browser_fd,SOL_SOCKET,SO_SNDTIMEO,(char*)&time_opt,sizeof(time_opt))  ==-1)  ){
 		printf("setsockopt error at init_from_browser\n");
-		return NULL;
+		return;
 	}
 	if ( setsockopt(browser_fd,SOL_SOCKET,SO_REUSEADDR,(uint*)&option,sizeof(option)) ==-1   ){
 		printf("setsockopt reuse error at init_from_browser");
-		return NULL;
+		return;
 	}
 	//-----proxy auth , step one-----
 	if ( recv(browser_fd, buff, 2, 0)==-1){
@@ -215,9 +229,9 @@ static void init_from_browser(struct ev_loop*loop,struct ev_io*watcher,int reven
 	if ( ((socks5_request_t *)buff)->ver != 0x05
 			||  ((socks5_request_t *)buff)->cmd !=0x01  ) {
 
-		((socks5_response_t *)buff)->ver = 0x05;
-		((socks5_response_t *)buff)->cmd = 0x07;
-		((socks5_response_t *)buff)->rsv = 0;
+		((socks5_request_t *)buff)->ver = 0x05;
+		((socks5_request_t *)buff)->cmd = 0x07;
+		((socks5_request_t *)buff)->rsv = 0;
 
 		// cmd not supported
 		send(browser_fd, buff, 4, 0);
@@ -241,7 +255,7 @@ static void init_from_browser(struct ev_loop*loop,struct ev_io*watcher,int reven
 		}
 		memcpy(&(outside_addr.sin_port), buff, 2);
 
-		printf("type : IP, %s:%d.\n", inet_ntoa(outside_addr.sin_addr), htons(outside_addr.sin_port));
+		printf("type : IP, %s:%d\n", inet_ntoa(outside_addr.sin_addr), htons(outside_addr.sin_port));
 
 	} else if ( ((socks5_request_t *)buff)->addrtype ==0x03) {
 		struct hostent *hptr;
@@ -283,14 +297,14 @@ static void init_from_browser(struct ev_loop*loop,struct ev_io*watcher,int reven
 			error_report(0,9,browser_fd);
 			return;
 		}
-		memcpy(&(otuside_addr.sin_port), buff, 2);
+		memcpy(&(outside_addr.sin_port), buff, 2);
 	} else {
-		((socks5_response_t *)buff)->ver = 0x05;
-		((socks5_response_t *)buff)->cmd = 0x08;
-		((socks5_response_t *)buff)->rsv = 0;
+		((socks5_request_t *)buff)->ver = 0x05;
+		((socks5_request_t *)buff)->cmd = 0x08;
+		((socks5_request_t *)buff)->rsv = 0;
 
 		// cmd not supported
-		send(sockfd, buff, 4, 0);
+		send(browser_fd, buff, 4, 0);
 		printf("error at initial the proxy connection , the connection command is not support\n");
 		close(browser_fd);
 		return;
@@ -299,14 +313,92 @@ static void init_from_browser(struct ev_loop*loop,struct ev_io*watcher,int reven
 	//-----send the new address to entry server-----
 	CONN_INFO*ptr=(CONN_INFO*)malloc(sizeof(CONN_INFO));
 	struct ev_io*browser_watcher=(struct ev_io*)malloc(sizeof(struct ev_io));
-	uint32_t streamid,thread_id;
+	uint32_t streamid,thread_id,len=6;
 	streamid=get_streamid();
 	thread_id=connection_distribute(streamid);
 	ptr=info_init(browser_fd,streamid,thread_id,browser_watcher);
+	info_insert(&info_head[thread_id],ptr);
 	
+	browser_watcher->data=(void*)ptr;
 
+	memcpy(buff,&streamid,4);
+	memcpy(buff+4,&len,4);
+	memcpy(buff+8,&(outside_addr.sin_addr.s_addr),4);
+	memcpy(buff+12,&(outside_addr.sin_port),2);
+
+	my_send(browser_fd,buff,14,"init_from_browser");
+
+	ev_io_init(browser_watcher,handle_from_browser,browser_fd,EV_READ);
+	ev_io_start(my_loop,browser_watcher);
 }
 
+static void handle_from_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
+{
+	if (revents & EV_ERROR){
+		printf("revent error at handle_from_browser\n");
+		return;
+	}
+
+	CONN_INFO*info=(CONN_INFO*)watcher->data;
+	int result;
+	uint32_t len;
+	char buff[MAXBUFF];
+	result=recv(watcher->fd,buff+8,MAXBUFF,0);
+	len=(uint32_t)result;
+	if (result<=0){
+		info_delete(&info_head[info->thread_id],info);
+	}
+	else{
+		memcpy(buff,&(info->streamid),4);
+		memcpy(buff+4,&len,4);
+		my_send(entry_fd[info->thread_id],buff,8+len,"handle_from_browser");
+	}
+}
+
+static void handle_from_entry(struct ev_loop*loop,struct ev_io*watcher,int revents)
+{
+	if (revents & EV_ERROR){
+		printf("revents error at handle_from_entry\n");
+		return;
+	}
+
+	char buff[MAXBUFF];
+	CONN_INFO*ptr=(CONN_INFO*)watcher->data;
+	uint32_t streamid,len;
+	int result , thread_id=ptr->thread_id , temp;
+
+	result=recv(entry_fd[thread_id],&streamid,4,0);
+	ptr=info_search(&info_head[thread_id],streamid);
+
+	//-----can not find this connection-----
+	if (ptr==NULL){
+		printf("cannot find streamid=%d , read this payload and ignore\n",streamid);
+		recv(entry_fd[thread_id],&len,4,0);
+		if (len<0 || len>2048){
+			printf("payload length error , %d\n",len);
+			exit(1);
+		}
+		else{
+			for (result=0;result<len;){
+				temp=recv(entry_fd[thread_id],buff,result,0);
+				result+=temp;
+			}
+			return;
+		}
+	}
+
+	recv(entry_fd[thread_id],&len,4,0);
+	if (len<0||len>2048){
+		printf("payload length error , %d\n",len);
+		exit(1);
+	}
+	for (result=0;result<len;){
+		temp=recv(entry_fd[thread_id],buff+result,len-result,0);
+		result+=temp;
+	}
+
+	my_send(ptr->browser_fd,buff,len,"handle_from_entry");
+}
 
 void error_report(int kind,int num,int browser_fd)
 {
@@ -361,10 +453,11 @@ void info_delete(CONN_INFO*head,CONN_INFO*tag)
 	for (walker=head->next,prev=head;walker!=NULL;walker=walker->next){
 		if (walker->streamid==tag_streamid){
 			prev->next=walker->next;
+			/*
 			ev_io_stop(my_loop,walker->watcher);
 			free(walker->watcher);
 			close(walker->browser_fd);
-			free(walker);
+			free(walker);*/
 			return;
 		}
 		prev=walker;
@@ -379,4 +472,23 @@ CONN_INFO*info_search(CONN_INFO*head,int streamid)
 	}
 	return NULL;
 }
+
+void my_send(int fd,char*buff,int size,char func_name[])
+{
+	int result;
+	result=send(fd,buff,size,0);
+#ifdef debug
+	if (result<size)
+		printf("send not complete , need to send %d but only send %d\n",size,result);
+	if (result<0)
+		printf("send error at func %s , %s\n",func_name,strerror(errno));
+#endif
+}
+
+
+
+
+
+
+
 
