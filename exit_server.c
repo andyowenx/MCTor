@@ -42,6 +42,7 @@ void Servlet(SSL* ssl);
 int server_init(int port);
 int connect_init(char*outside,int middle_fd,int streamid);
 
+
 void thread_func(int*id);
 static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int revents);
 static void read_outside(struct ev_loop*loop,struct ev_io*watcher,int revents);
@@ -59,11 +60,11 @@ int main()
        printf("pthread mutex fail\n");
        exit(1);
        }
-    if (pthread_mutex_init(&lock,NULL)!=0){
-	printf("mutex lock init error\n");
-	exit(1);
-    }
-    */
+       if (pthread_mutex_init(&lock,NULL)!=0){
+       printf("mutex lock init error\n");
+       exit(1);
+       }
+     */
     signal(SIGPIPE,SIG_IGN);
     struct ev_io fd;
     pthread_t thread[THREAD_NUM];
@@ -117,7 +118,7 @@ int main()
 int server_init(int port)
 {
     int server_fd;
-    int flag,option;
+    int flag,option=1;
     struct sockaddr_in server_addr;
     if ( (server_fd=socket(AF_INET,SOCK_STREAM,0)) <0){
 	perror("socket open error\n");
@@ -128,7 +129,6 @@ int server_init(int port)
     server_addr.sin_family=AF_INET;
     server_addr.sin_addr.s_addr=INADDR_ANY;
     server_addr.sin_port=htons(port);
-
     /*
        if ( (flag=fcntl(server_fd,F_GETFL,0))==-1  ){
        perror("fcntl error in F_GETFL\n");
@@ -257,6 +257,7 @@ static void read_outside(struct ev_loop*loop,struct ev_io*watcher,int revents)
     char buff[MAXBUFF];
     ssize_t result;
     uint32_t len;
+    uint32_t total_len,temp;
     if (EV_ERROR & revents){
 	printf("revents error at read browser\n");
 	return;
@@ -268,7 +269,7 @@ static void read_outside(struct ev_loop*loop,struct ev_io*watcher,int revents)
     result=recv(watcher->fd,buff+8,MAXBUFF,0);
 
     len=result;
-    
+    total_len=len+8;
     memcpy(buff,&(info->streamid),4);
     memcpy(buff+4,&len,4);
 
@@ -282,7 +283,10 @@ static void read_outside(struct ev_loop*loop,struct ev_io*watcher,int revents)
     }
     else{  //-----normal receive packet from browser-----
 	printf("send to middle stream id= %d , len = %d\n",info->streamid,len);
-	send(info->middle_fd,buff, (sizeof(uint32_t)*2)      +  (len*sizeof(char))        ,0);
+	for (result=0;result<total_len;){
+	    temp=send(info->middle_fd,buff+result, total_len-result  ,0);
+	    result+=temp;
+	}
     }
 }
 
@@ -348,7 +352,7 @@ int connect_init(char*outside, int middle_fd,int streamid)
     char buff[MAXBUFF];
     int option=1;
     uint16_t port;
-    uint32_t payload_len;
+    uint32_t payload_len,result,temp;
 
     bzero((char*)&client_addr,sizeof(client_addr));
     memcpy(&port,outside+4,2);
@@ -363,21 +367,26 @@ int connect_init(char*outside, int middle_fd,int streamid)
 	printf("client socket initial error\n");
 	return -1;
     }
-    /*
 
-       time_opt.tv_sec=2;
-       time_opt.tv_usec=0;
-       if (  setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&time_opt, sizeof(time_opt)) ==-1 
-       ||  setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, (char *)&time_opt, sizeof(time_opt)) ==-1 ) {
-       printf("setsocket error at client init\n");
-       return -1; 
-       }   
+    time_opt.tv_sec=2;
+    time_opt.tv_usec=0;
+    if (  setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&time_opt, sizeof(time_opt)) ==-1 
+	    ||  setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, (char *)&time_opt, sizeof(time_opt)) ==-1 ) {
+	printf("setsocket error at client init\n");
+	return -1; 
+    }   
 
-       if ( setsockopt(client_fd, SOL_SOCKET, SO_REUSEADDR, (uint *)&option, sizeof(option)) ==-1  ) {
-       printf("setsocket error at client init\n");
-       return -1; 
-       }   
-     */
+#ifdef SO_NOSIGPIPE             
+    setsockopt(sockfd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
+#endif
+
+    if ( setsockopt(client_fd, SOL_SOCKET, SO_REUSEADDR, (uint *)&option, sizeof(option)) ==-1  ) {
+	printf("setsocket error at client init\n");
+	return -1; 
+    }
+
+
+
     if ( connect(client_fd,(struct sockaddr*)&client_addr,sizeof(client_addr)) <0  ){
 	printf("connect error at client_init , %s\n",strerror(errno));
 	return -1;
@@ -389,14 +398,17 @@ int connect_init(char*outside, int middle_fd,int streamid)
     //if ( getpeername(client_fd,(struct sockaddr*)&client_addr, (socklen_t*)&client_len) <0 ){
     //	printf("getpeername error at client_init\n");
     //}
-    
+
     memcpy(buff,&streamid,4);
     memcpy(buff+4,&payload_len,4);
 
     memcpy(buff+8, "\x05\x00\x00\x01", 4);                                  
     memcpy(buff + 12, &(client_addr.sin_addr.s_addr), 4);
     memcpy(buff + 16, &(client_addr.sin_port), 2);
-    send(middle_fd,buff,  (sizeof(uint32_t)*2)    +    (payload_len*sizeof(char))  ,0);
+    for (result=0;result<payload_len+8;){
+	temp=send(middle_fd,buff+result, payload_len+8-result  ,0);
+	result+=temp;
+    }
 
 
     return client_fd;
@@ -439,7 +451,7 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
     CONN_INFO*ptr;
     int*id=(int*)watcher->data ,i;
     struct ev_io *outside_watcher;
-    int middle_fd=watcher->fd  , temp , receive_num;
+    int middle_fd=watcher->fd  , temp , receive_num,total_len,result;
     struct sockaddr_in middle_addr;
 
     if ( recv(middle_fd,&streamid,sizeof(uint32_t),0) >0 ){
@@ -448,7 +460,7 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
 	if (ptr==NULL){
 	    ptr=info_init(-1,streamid,*id,middle_fd);
 	    recv(middle_fd,&payload_len,sizeof(uint32_t),0);
-	    
+
 	    if (payload_len<0){
 		printf("recv payload_len < 0 at handle_from_middle and it is a new connection , drop it\n");
 		return;
@@ -467,14 +479,17 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
 
 	    if (ptr->browser_fd==-1){
 		free(ptr);
-		
+
 		payload_len=10;
 
 		memcpy(buff,&streamid,4);
 		memcpy(buff+4,&payload_len,4);
 		memcpy(buff+8,"\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00",10);
 
-		send(middle_fd,buff, (sizeof(uint32_t)*2) +  (payload_len*sizeof(char)),0);
+		for (result=0,total_len=payload_len+8;result<total_len;){
+		    temp=send(middle_fd,buff+result, total_len-result,0);
+		    result+=temp;
+		}
 		printf("connect error , drop connection\n");
 		return;
 	    }
@@ -482,7 +497,7 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
 
 	    outside_watcher=(struct ev_io*)malloc(sizeof(struct ev_io));
 	    outside_watcher->data=(void*)ptr;
-	    
+
 	    //-----part of initial ev_io-----
 	    ptr->watcher=outside_watcher;
 
@@ -490,9 +505,9 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
 	    ev_io_start(thread_loop[*id],outside_watcher);
 	    return;
 	}
-	
+
 	recv(middle_fd,&payload_len,sizeof(uint32_t),0);
-	
+
 	if (payload_len < 0){
 	    printf("recv payload_len < 0 at handle_from_middle , disconnect\n");
 	    info_delete(&thread_head[*id],ptr);
@@ -506,8 +521,8 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
 	printf("recv from middle , stream id : %d , len : %d\n",streamid,payload_len);
 	send(ptr->browser_fd,buff,payload_len*sizeof(char),0);	
 	/*if (payload_len==0){
-	    close(ptr->browser_fd);
-	    return;
-	}*/
+	  close(ptr->browser_fd);
+	  return;
+	  }*/
     }
 }
