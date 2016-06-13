@@ -511,6 +511,10 @@ static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 	else{  //-----normal receive packet from browser-----
 		//printf("send to stream id : %d , len = %d\n",info->streamid,len);
 		result=send(entry_fd[info->thread_id],buff,  (sizeof(uint32_t)*2)  +  (len*sizeof(char))  ,0);
+		if (result < len-8){
+			printf("result < len -8  , len=%d , result=%d\n",len,(int)result);
+			exit(1);
+		}
 		recv_send_print(result,1,"read_browser");
 	}
 }
@@ -595,20 +599,7 @@ void thread_func(int*id)
 		printf("connect error at thread %d\n",*id);
 		return;
 	}
-	//static int cnt = 0;
 	while (1){
-		/*
-		   if (cnt == 1) {
-		   num = recv(entry_fd[*id],bigbuff,8192,0);
-		   int j;	
-
-		   for (j = 0; j < num; j++) {
-		   if (j % 8 == 0) printf("\nbigbuff %d:", j);
-		   printf("%02x ", bigbuff[j]);
-		   }
-		   }
-		   cnt++;
-		 */
 		result=recv(entry_fd[*id],&streamid,sizeof(uint32_t),0);
 		recv_send_print(result,0,"thread_func");
 		result=recv(entry_fd[*id],&payload_len,sizeof(uint32_t),0);
@@ -619,7 +610,7 @@ void thread_func(int*id)
 			printf("recv error here ,streamid=%d  , payload_len=%d\n",streamid,payload_len);
 			continue;
 		}
-		//printf("recv from entry , stream id : %d , len : %d\n",streamid,payload_len);
+		printf("recv from entry , stream id : %d , len : %d\n",streamid,payload_len);
 		ptr=info_search(&thread_head[*id],streamid);
 
 
