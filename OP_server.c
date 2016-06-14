@@ -60,7 +60,8 @@ void sock_auth_fail(int step,int kind);
 uint32_t get_stream_id();
 uint32_t connection_distribute(uint32_t streamid);
 static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents);
-
+void total_send(int fd,char *buff, uint32_t len, char func_name[]);
+void total_recv(int fd,char *buff , uint32_t len , char func_name[]);
 
 void thread_func(int*id);
 
@@ -69,22 +70,17 @@ void info_insert(CONN_INFO*head,CONN_INFO*tag);
 void info_delete(CONN_INFO*head,CONN_INFO*tag);
 CONN_INFO*info_search(CONN_INFO*head,int streamid);
 
-void recv_send_print(int result,int send_or_recv,char func[]);
 
 
 int main()
 {
 	//SSL_library_init();
+	
 	/*
-	   if (  pthread_mutex_init(&lock,NULL) !=0){
-	   printf("pthread mutex fail\n");
-	   exit(1);
-	   }
-	 */
 	if (pthread_mutex_init(&lock,NULL)!=0){
 		printf("mutex lock init error\n");
 		exit(1);
-	}
+	}*/
 	signal(SIGPIPE,SIG_IGN);
 	int server_fd=server_init();
 	struct ev_io fd;
@@ -293,11 +289,10 @@ void Servlet(SSL* ssl)	/* Serve the connection -- threadable */
 
 static void browser_connect_to_proxy(struct ev_loop*loop,struct ev_io*watcher,int revents)
 {
-	printf("into browser_connect_to_proxy\n");
 	int browser_fd  , connect_tag;
 	uint32_t streamid ,payload_len;
 	struct sockaddr_in browser_addr , entry_addr;
-	int browser_len=sizeof(browser_addr)  ,result;
+	int browser_len=sizeof(browser_addr)  ,result,temp;
 	char *outside;
 	char buff[MAXBUFF];
 	struct ev_io*browser_watcher;
@@ -330,9 +325,8 @@ static void browser_connect_to_proxy(struct ev_loop*loop,struct ev_io*watcher,in
 	memcpy(buff,&streamid,4);
 	memcpy(buff+4,&payload_len,4);
 	memcpy(buff+8,outside,6);
-
-	result=send(entry_fd[connect_tag],buff, (sizeof(uint32_t)*2) +   (payload_len*sizeof(char))  ,0);	//-----payload-----
-	recv_send_print(result,1,"browser_connect_to_proxy");
+	
+	total_send(entry_fd[connect_tag],buff,payload_len+8,"browser_connect_to_proxy");
 
 	free(outside);
 
@@ -381,11 +375,8 @@ char*getOutsideAddr(int browser_fd)
 
 	//-----socket auth , step two-----
 	outside_addr.sin_family=AF_INET;
-
-	if ( recv(browser_fd,buff,4,0)==-1){
-		sock_auth_fail(2,0);
-		return NULL;
-	}
+	
+	total_recv(browser_fd,buff,4,"getOutsideAddr");
 	if (buff[0]!=5	//socket5
 			||buff[1]!=1){	//CONNECT
 		buff[0]=5;
@@ -395,16 +386,11 @@ char*getOutsideAddr(int browser_fd)
 		return NULL;
 	}
 	if (buff[3]==1){  //-----IPv4-----
-		if ( recv(browser_fd,buff,4,0) ==-1){
-			sock_auth_fail(2,0);
-			return NULL;
-		}
+		total_recv(browser_fd,buff,4,"getOutsideAddr");
 		memcpy(return_str,buff,4);
 		memcpy(&outside_addr.sin_addr.s_addr,buff,4);
-		if (  recv(browser_fd,buff,2,0) ==-1){
-			sock_auth_fail(2,0);
-			return NULL;
-		}
+
+		total_recv(browser_fd,buff,2,"getOutsideAddr");
 		memcpy(return_str+4,buff,2);
 		memcpy(&outside_addr.sin_port,buff,2);
 
@@ -412,16 +398,10 @@ char*getOutsideAddr(int browser_fd)
 	}
 	else if (buff[3]==3){ //-----query with domain name-----
 		struct hostent *hp;
-		if (  recv(browser_fd,buff,1,0) ==-1){
-			sock_auth_fail(2,0);
-			return NULL;
-		}
+		total_recv(browser_fd,buff,1,"getOutsideAddr");
 		hostname_len=buff[0];
 		buff[hostname_len]=0;
-		if (  recv(browser_fd,buff,hostname_len,0) ==-1){
-			sock_auth_fail(2,0);
-			return NULL;
-		}
+		total_recv(browser_fd,buff,hostname_len,"getOutsideAddr");
 		hp=gethostbyname(buff);
 		printf("outside domain : %s\n",buff);
 		if (buff==NULL){
@@ -437,16 +417,14 @@ char*getOutsideAddr(int browser_fd)
 			return NULL;
 		}
 		memcpy( return_str,*(hp->h_addr_list),4);
-		if (  recv(browser_fd,buff,2,0) ==-1){
-			sock_auth_fail(2,0);
-			return NULL;
-		}
+
+		total_recv(browser_fd,buff,2,"getOutsideAddr");
 		memcpy( return_str+4,buff,2);
 
 	}
 	else{   //-----command not support-----
 		buff[0]=5;
-		buff[1]=7;
+		buff[1]=8;
 		buff[2]=0;
 		if ( send(browser_fd,buff,4,0) ==-1){
 			sock_auth_fail(2,1);
@@ -478,8 +456,7 @@ uint32_t connection_distribute(uint32_t streamid)
 static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 {
 	char buff[MAXBUFF];
-	ssize_t result;
-	uint32_t len;
+	uint32_t len,temp,result;
 	if (EV_ERROR & revents){
 		printf("revents error at read browser\n");
 		return;
@@ -489,10 +466,8 @@ static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 
 
 	//-----the first eight byte is stream id and payload length-----
-	result=recv(watcher->fd,buff+8,MAXBUFF,0);
+	result=recv(watcher->fd,buff+8,MAXRECV,0);
 
-
-	recv_send_print(result,0,"read_browser");
 
 	len=result;
 
@@ -510,12 +485,8 @@ static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 	}
 	else{  //-----normal receive packet from browser-----
 		//printf("send to stream id : %d , len = %d\n",info->streamid,len);
-		result=send(entry_fd[info->thread_id],buff,  (sizeof(uint32_t)*2)  +  (len*sizeof(char))  ,0);
-		if (result < len-8){
-			printf("result < len -8  , len=%d , result=%d\n",len,(int)result);
-			exit(1);
-		}
-		recv_send_print(result,1,"read_browser");
+		total_send(entry_fd[info->thread_id],buff,len+8,"read_browser");
+		printf("send to entry ok , streamid=%d , len=%d\n",info->streamid,len+8);
 	}
 }
 
@@ -581,7 +552,7 @@ void thread_func(int*id)
 	struct sockaddr_in entry_addr;
 	struct ev_io*entry_watcher,*browser_watcher;
 	uint32_t streamid , payload_len;
-	char buff[MAXBUFF], bigbuff[8192];
+	char buff[MAXBUFF];
 	int i,receive_num,temp, result;
 	CONN_INFO*ptr;
 
@@ -600,62 +571,68 @@ void thread_func(int*id)
 		return;
 	}
 	while (1){
-		result=recv(entry_fd[*id],&streamid,sizeof(uint32_t),0);
-		recv_send_print(result,0,"thread_func");
-		result=recv(entry_fd[*id],&payload_len,sizeof(uint32_t),0);
-		recv_send_print(result,0,"thread_func");
-		if(payload_len < 0 || payload_len>2048 ){
+		total_recv(entry_fd[*id],buff,4,"thread_func");
+		memcpy(&streamid,buff,4);
+		total_recv(entry_fd[*id],buff,4,"thread_func");
+		memcpy(&payload_len,buff,4);
+		if(payload_len < 0 || payload_len> 8192 ){
 			//printf("recv EOF from entry , close streamid=%d\n",streamid);
 			//info_delete(&thread_head[*id],info_search(&thread_head[*id],streamid));
 			printf("recv error here ,streamid=%d  , payload_len=%d\n",streamid,payload_len);
 			continue;
 		}
-		printf("recv from entry , stream id : %d , len : %d\n",streamid,payload_len);
 		ptr=info_search(&thread_head[*id],streamid);
 
 
 		if (ptr==NULL){
-			printf("cannot find ptr which streamid is %d\n",streamid);
-			if (payload_len <=2048 && payload_len >=0 ){
-				for (i=0,receive_num=0;receive_num<payload_len;i++){
-					if(i>10){
-						printf("too much loop at receive_num loop\n");
-						break;
-					}
-					temp=recv(entry_fd[*id],buff+receive_num,(payload_len-receive_num)*sizeof(char),0);
-					receive_num+=temp;
-					//printf("recv %d len from buff\n",temp);
-				}
-			}
+			printf("cannot find ptr which streamid=%d , payload_len=%d\n",streamid,payload_len);
+			if (payload_len <8192 && payload_len >=0 )
+				total_recv(entry_fd[*id],buff,payload_len,"thread_func");
 			continue;
 		}
 
+		total_recv(entry_fd[*id],buff,payload_len,"thread_func");
 
-		for (i=0,receive_num=0;receive_num<payload_len  &&payload_len< 2049;i++){
-			if(i>10){
-				printf("too much loop at receive_num loop\n");
-				break;
-			}
-			temp=recv(entry_fd[*id],buff+receive_num,(payload_len-receive_num)*sizeof(char),0);
-			receive_num+=temp;
-			//printf("recv %d len for buff\n",temp);
-		}
-		result=send(ptr->browser_fd,buff,receive_num*sizeof(char),0);
-		recv_send_print(result,1,"thread_func");
+		printf("recv from entry ok , streamid=%d , len=%d\n",streamid,payload_len+8);
+
+		total_send(ptr->browser_fd,buff,payload_len,"thread_func");
 	}
 	return;
 }
 
-void recv_send_print(int result,int send_or_recv,char func[])
-{
-	char type[20];
-	if (send_or_recv==0)
-		strcpy(type,"recv");
-	else
-		strcpy(type,"send");
 
-	if (result==0)
-		printf("%s EOF , func=%s  , error message : %s\n",type,func,strerror(errno));
-	else if (result<0)
-		printf("%s error, func=%s , error message : %s\n",type,func,strerror(errno));
+
+void total_send(int fd,char*buff,uint32_t len , char func_name[])
+{
+	uint32_t send_byte , temp , counter;
+	for (send_byte=0 , temp=0 , counter=0  ;send_byte<len;      send_byte+=temp   ,counter++){
+		temp=send(fd,buff+send_byte , len-send_byte,0);
+		if (temp<0){
+			printf("send error at %s , %s\n",func_name,strerror(errno));
+			exit(1);
+		}
+		if (counter>10){
+			printf("stay at send loop too long , fd=%d , len=%d  , func=%s\n",fd,len,func_name);
+			exit(1);
+		}
+	}
+}
+void total_recv(int fd,char*buff,uint32_t len , char func_name[])
+{
+	uint32_t recv_byte , temp ,counter;
+	for (recv_byte=0, temp=0 , counter=0  ; recv_byte<len  ; recv_byte+=temp , counter++  ){
+		temp=recv(fd,buff+recv_byte, len-recv_byte , 0);
+		if (temp==0){
+			printf("recv EOF at %s\n",func_name);
+			return;
+		}
+		else if (temp<0){
+			printf("recv error at %s , %s\n",func_name,strerror(errno));
+			exit(1);
+		}
+		if (counter>10){
+			printf("stay at recv loop too long , fd=%d , len=%d\n , func=%s\n",fd,len,func_name);
+			exit(1);
+		}
+	}
 }
