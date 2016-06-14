@@ -41,7 +41,8 @@ void Servlet(SSL* ssl);
 
 int server_init(int port);
 int connect_init(char*outside,int middle_fd,int streamid);
-
+void total_send(int fd,char*buff,uint32_t len,char func_name[]);
+void total_recv(int fd,char*buff,uint32_t len,char func_name[]);
 
 void thread_func(int*id);
 static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int revents);
@@ -266,7 +267,7 @@ static void read_outside(struct ev_loop*loop,struct ev_io*watcher,int revents)
     CONN_INFO*info=(CONN_INFO*)watcher->data;
 
     //-----the first eight bytes are stream id and payload length
-    result=recv(watcher->fd,buff+8,MAXBUFF,0);
+    result=recv(watcher->fd,buff+8,MAXRECV,0);
 
     len=result;
     total_len=len+8;
@@ -282,11 +283,8 @@ static void read_outside(struct ev_loop*loop,struct ev_io*watcher,int revents)
 	//free(watcher);
     }
     else{  //-----normal receive packet from browser-----
-	printf("send to middle stream id= %d , len = %d\n",info->streamid,len);
-	for (result=0;result<total_len;){
-	    temp=send(info->middle_fd,buff+result, total_len-result  ,0);
-	    result+=temp;
-	}
+	total_send(info->middle_fd,buff,total_len,"read_outside");
+	printf("send to middle ok , streamid=%d , len=%d\n",info->streamid,total_len);
     }
 }
 
@@ -405,11 +403,9 @@ int connect_init(char*outside, int middle_fd,int streamid)
     memcpy(buff+8, "\x05\x00\x00\x01", 4);                                  
     memcpy(buff + 12, &(client_addr.sin_addr.s_addr), 4);
     memcpy(buff + 16, &(client_addr.sin_port), 2);
-    for (result=0;result<payload_len+8;){
-	temp=send(middle_fd,buff+result, payload_len+8-result  ,0);
-	result+=temp;
-    }
 
+    total_send(middle_fd,buff,payload_len+8,"connect_init");
+    printf("send to middle ok , len=%d at connect init\n",payload_len+8);
 
     return client_fd;
 }
@@ -454,75 +450,94 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
     int middle_fd=watcher->fd  , temp , receive_num,total_len,result;
     struct sockaddr_in middle_addr;
 
-    if ( recv(middle_fd,&streamid,sizeof(uint32_t),0) >0 ){
-	ptr=info_search(&thread_head[*id],streamid);
-	//-----new connection incoming-----
-	if (ptr==NULL){
-	    ptr=info_init(-1,streamid,*id,middle_fd);
-	    recv(middle_fd,&payload_len,sizeof(uint32_t),0);
-
-	    if (payload_len<0){
-		printf("recv payload_len < 0 at handle_from_middle and it is a new connection , drop it\n");
-		return;
-	    }
-	    for (i=0,receive_num=0;receive_num<payload_len;i++){
-		temp=recv(middle_fd,buff+receive_num,(payload_len-receive_num)*sizeof(char),0);
-		receive_num+=temp;
-		if (i>10){
-		    printf("too many times at handle_from_middle\n");
-		    break;
-		}
-	    }
+    total_recv(middle_fd,buff,4,"handle_from_middle");
+    memcpy(&streamid,buff,4);
+    ptr=info_search(&thread_head[*id],streamid);
+    //-----new connection incoming-----
+    if (ptr==NULL){
+	ptr=info_init(-1,streamid,*id,middle_fd);
+	total_recv(middle_fd,buff,4,"handle_from_middle");
+	memcpy(&payload_len,buff,4);
+	
+	if (payload_len <0 || payload_len >4500){
+	    printf("payload length error , streamid=%d , payload_len=%d at handle_from_middle\n",streamid,payload_len);
+	    exit(1);
+	}
+	total_recv(middle_fd,buff,payload_len,"handle_from_middle");
 
 
-	    ptr->browser_fd=connect_init(buff,middle_fd,streamid);
+	ptr->browser_fd=connect_init(buff,middle_fd,streamid);
 
-	    if (ptr->browser_fd==-1){
-		free(ptr);
+	if (ptr->browser_fd==-1){
+	    free(ptr);
 
-		payload_len=10;
+	    payload_len=10;
 
-		memcpy(buff,&streamid,4);
-		memcpy(buff+4,&payload_len,4);
-		memcpy(buff+8,"\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00",10);
+	    memcpy(buff,&streamid,4);
+	    memcpy(buff+4,&payload_len,4);
+	    memcpy(buff+8,"\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00",10);
 
-		for (result=0,total_len=payload_len+8;result<total_len;){
-		    temp=send(middle_fd,buff+result, total_len-result,0);
-		    result+=temp;
-		}
-		printf("connect error , drop connection\n");
-		return;
-	    }
-	    info_insert(&thread_head[*id],ptr);
-
-	    outside_watcher=(struct ev_io*)malloc(sizeof(struct ev_io));
-	    outside_watcher->data=(void*)ptr;
-
-	    //-----part of initial ev_io-----
-	    ptr->watcher=outside_watcher;
-
-	    ev_io_init(outside_watcher, read_outside ,ptr->browser_fd , EV_READ);
-	    ev_io_start(thread_loop[*id],outside_watcher);
+	    total_send(middle_fd,buff,payload_len+8,"handle_from_middle");
+	    printf("connect error , send to middle len=%d to drop connection\n",payload_len+8);
 	    return;
 	}
+	info_insert(&thread_head[*id],ptr);
 
-	recv(middle_fd,&payload_len,sizeof(uint32_t),0);
+	outside_watcher=(struct ev_io*)malloc(sizeof(struct ev_io));
+	outside_watcher->data=(void*)ptr;
 
-	if (payload_len < 0){
-	    printf("recv payload_len < 0 at handle_from_middle , disconnect\n");
-	    info_delete(&thread_head[*id],ptr);
-	    return;
-	}
+	//-----part of initial ev_io-----
+	ptr->watcher=outside_watcher;
 
-	for (receive_num=0;receive_num<payload_len;){
-	    temp=recv(middle_fd,buff+receive_num,(payload_len-receive_num)*sizeof(char),0);
-	    receive_num+=temp;
-	}
-	printf("recv from middle , stream id : %d , len : %d\n",streamid,payload_len);
-	send(ptr->browser_fd,buff,payload_len*sizeof(char),0);	
-	/*if (payload_len==0){
-	  close(ptr->browser_fd);
-	  return;
-	  }*/
+	ev_io_init(outside_watcher, read_outside ,ptr->browser_fd , EV_READ);
+	ev_io_start(thread_loop[*id],outside_watcher);
+	return;
     }
+    
+    total_recv(middle_fd,buff,4,"handle_from_middle");
+    memcpy(&payload_len,buff,4);
+    if (payload_len < 0 || payload_len > 8096){
+	printf("payload length error , streamid=%d , payload_len=%d at handle_from_middle\n",streamid,payload_len);
+	exit(1);
+    }
+    
+    total_recv(middle_fd,buff,payload_len,"handle_from_middle");
+    printf("recv from middle ok , streamid=%d , len=%d\n",streamid,payload_len);
+
+    total_send(ptr->browser_fd,buff,payload_len,"handle_from_middle");
 }
+
+void total_send(int fd,char*buff,uint32_t len , char func_name[])
+{
+    uint32_t send_byte , temp , counter;
+    for (send_byte=0 , temp=0 , counter=0  ;send_byte<len;      send_byte+=temp   ,counter++){
+	temp=send(fd,buff+send_byte , len-send_byte,0);
+	if (temp<0){
+	    printf("send error at %s , %s\n",func_name,strerror(errno));
+	    exit(1);
+	}   
+	if (counter>10){
+	    printf("stay at send loop too long , fd=%d , len=%d  , func=%s\n",fd,len,func_name);
+	    exit(1);
+	}   
+    }   
+}
+void total_recv(int fd,char*buff,uint32_t len , char func_name[])
+{
+    uint32_t recv_byte , temp ,counter;
+    for (recv_byte=0, temp=0 , counter=0  ; recv_byte<len  ; recv_byte+=temp , counter++  ){  
+	temp=recv(fd,buff+recv_byte, len-recv_byte , 0); 
+	if (temp==0){
+	    printf("recv EOF at %s\n",func_name);
+	    return;
+	}   
+	else if (temp<0){
+	    printf("recv error at %s , %s\n",func_name,strerror(errno));
+	    exit(1);
+	}   
+	if (counter>10){
+	    printf("stay at recv loop too long , fd=%d , len=%d\n , func=%s\n",fd,len,func_name);
+	    exit(1);
+	}   
+    }   
+}                  
