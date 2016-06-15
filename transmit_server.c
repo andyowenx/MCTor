@@ -61,7 +61,7 @@ int server_init(int port)
 		exit(1);
 	}
 
-	listen(fd,10);
+	listen(fd,5000);
 	return fd;
 }
 
