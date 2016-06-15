@@ -16,22 +16,6 @@
 #include <netdb.h>
 #include "hidden_info.h"
 
-/*
-   typedef struct cell_queue{
-   struct cell_queue*next;
-   char*content;
-   }CELL_QUEUE;
-
-
-
-   CELL_QUEUE*queue_head[THREAD_NUM];
-   pthread_mutex_t lock;
-
-   CELL_QUEUE*get_queue_head(int thread_id);
-   CELL_QUEUE*queue_init(int buff_len);
-   void queue_insert(char*str,int len);
-   void queue_delete(CELL_QUEUE*walker);
- */
 typedef struct conn_info{
 	struct conn_info*next;
 	int browser_fd;
