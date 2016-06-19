@@ -15,6 +15,7 @@
 #include <ev.h>
 #include <netdb.h>
 #include "hidden_info.h"
+#include "aes.h"
 
 typedef struct conn_info{
 	struct conn_info*next;
@@ -440,6 +441,7 @@ uint32_t connection_distribute(uint32_t streamid)
 static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 {
 	char buff[MAXBUFF];
+	char encrypt_buff[MAXBUFF];
 	uint32_t len,temp,result;
 	if (EV_ERROR & revents){
 		printf("revents error at read browser\n");
@@ -450,13 +452,16 @@ static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 
 
 	//-----the first eight byte is stream id and payload length-----
-	result=recv(watcher->fd,buff+8,MAXRECV,0);
+	result=recv(watcher->fd,buff,MAXRECV,0);
+
+	//-----encrypt payload-----
+	aesctr_encrypt(buff,encrypt_buff+8,result);
 
 
 	len=result;
 
-	memcpy(buff,& (info->streamid),4);
-	memcpy(buff+4,&len,4);
+	memcpy(encrypt_buff,& (info->streamid),4);
+	memcpy(encrypt_buff+4,&len,4);
 
 	//-----end of connection-----
 	if (result<=0){
@@ -469,7 +474,7 @@ static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 	}
 	else{  //-----normal receive packet from browser-----
 		//printf("send to stream id : %d , len = %d\n",info->streamid,len);
-		total_send(entry_fd[info->thread_id],buff,len+8,"read_browser");
+		total_send(entry_fd[info->thread_id],encrypt_buff,len+8,"read_browser");
 		printf("send to entry ok , streamid=%d , len=%d\n",info->streamid,len+8);
 	}
 }
@@ -537,6 +542,7 @@ void thread_func(int*id)
 	struct ev_io*entry_watcher,*browser_watcher;
 	uint32_t streamid , payload_len;
 	char buff[MAXBUFF];
+	char decrypt_buff[MAXBUFF];
 	int i,receive_num,temp, result;
 	CONN_INFO*ptr;
 
@@ -577,9 +583,11 @@ void thread_func(int*id)
 
 		total_recv(entry_fd[*id],buff,payload_len,"thread_func");
 
-		printf("recv from entry ok , streamid=%d , len=%d\n",streamid,payload_len+8);
+		//printf("recv from entry ok , streamid=%d , len=%d\n",streamid,payload_len+8);
+		//-----decrypt payload-----
+		aesctr_encrypt(buff,decrypt_buff,payload_len);
 
-		total_send(ptr->browser_fd,buff,payload_len,"thread_func");
+		total_send(ptr->browser_fd,decrypt_buff,payload_len,"thread_func");
 	}
 	return;
 }

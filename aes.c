@@ -1,22 +1,12 @@
-#include <openssl/aes.h>
+#include <openssl/aes.h>                                                                                                                                                           
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-
-
-#define BYTES_SIZE 16
-#define KEY_SIZE 128
-
-
-unsigned char iv[BYTES_SIZE];
-struct ctr_state {
-	unsigned char ivec[AES_BLOCK_SIZE];
-	unsigned int num;
-	unsigned char ecount[AES_BLOCK_SIZE];
-};
-unsigned char ckey[] =  "abcdefghijklmnop"; // It is 128bits though..
+#include "aes.h"
 
 AES_KEY key;
+unsigned char ckey[] =  "abcdefghijklmnop"; //-----128bit-----
+
 
 int init_ctr(struct ctr_state *state, const unsigned char iv[BYTES_SIZE]){
 	state->num = 0;
@@ -24,9 +14,8 @@ int init_ctr(struct ctr_state *state, const unsigned char iv[BYTES_SIZE]){
 	memset(state->ivec+BYTES_SIZE , 0, BYTES_SIZE);
 	memcpy(state->ivec, iv, BYTES_SIZE);
 }
-// encrypt twice  == decrypt
 
-void encrypt(unsigned char *indata,unsigned char *outdata ,int bytes_read){
+void aesctr_encrypt(unsigned char *indata,unsigned char *outdata ,int bytes_read){
 
 	int i=0;
 	int mod_len=0;
@@ -56,25 +45,3 @@ void encrypt(unsigned char *indata,unsigned char *outdata ,int bytes_read){
 	}
 
 }
-
-/*
-int main(int argc, char *argv[]){
-	int i=0;
-	unsigned char fs[5000] , out[5000];
-
-	for (i=0;i<BYTES_SIZE;i++){
-		iv[i]=0;
-	}
-
-	for (i=0;i<5000;i++)
-		fs[i]='1';
-
-	printf("plain :[%s]\n",fs);
-
-	encrypt(fs ,out ,5000);
-	printf("encode:[%s]\n",out);
-
-	encrypt(out ,fs ,5000);
-	printf("decode:[%s]\n",fs);
-	return 0;
-}*/
