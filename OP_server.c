@@ -311,6 +311,9 @@ static void browser_connect_to_proxy(struct ev_loop*loop,struct ev_io*watcher,in
 	memcpy(buff+4,&payload_len,4);
 	memcpy(buff+8,outside,6);
 	
+	//-----encrypt-----
+	aesctr_encrypt(buff+8,buff+8,6);
+
 	total_send(entry_fd[connect_tag],buff,payload_len+8,"browser_connect_to_proxy");
 
 	free(outside);
@@ -584,6 +587,8 @@ void thread_func(int*id)
 		total_recv(entry_fd[*id],buff,payload_len,"thread_func");
 
 		//printf("recv from entry ok , streamid=%d , len=%d\n",streamid,payload_len+8);
+
+
 		//-----decrypt payload-----
 		aesctr_encrypt(buff,decrypt_buff,payload_len);
 
