@@ -257,7 +257,6 @@ void Servlet(SSL* ssl)	/* Serve the connection -- threadable */
 static void read_outside(struct ev_loop*loop,struct ev_io*watcher,int revents)
 {
     char buff[MAXBUFF];
-    char encrypt_buff[MAXBUFF];
     ssize_t result;
     uint32_t len;
     uint32_t total_len,temp;
@@ -269,15 +268,15 @@ static void read_outside(struct ev_loop*loop,struct ev_io*watcher,int revents)
     CONN_INFO*info=(CONN_INFO*)watcher->data;
 
     //-----the first eight bytes are stream id and payload length
-    result=recv(watcher->fd,buff,MAXRECV,0);
+    result=recv(watcher->fd,buff+8,MAXRECV,0);
 
     //-----encrypt payload-----
-    aesctr_encrypt(buff,encrypt_buff+8,result);
+    //aesctr_encrypt(buff+8,buff+8,result);
 
     len=result;
     total_len=len+8;
-    memcpy(encrypt_buff,&(info->streamid),4);
-    memcpy(encrypt_buff+4,&len,4);
+    memcpy(buff,&(info->streamid),4);
+    memcpy(buff+4,&len,4);
 
     //-----end of connection-----
     if (result<=0){
@@ -288,7 +287,7 @@ static void read_outside(struct ev_loop*loop,struct ev_io*watcher,int revents)
 	//free(watcher);
     }
     else{  //-----normal receive packet from browser-----
-	total_send(info->middle_fd,encrypt_buff,total_len,"read_outside");
+	total_send(info->middle_fd,buff,total_len,"read_outside");
 	//printf("send to middle ok , streamid=%d , len=%d\n",info->streamid,total_len);
     }
 }
@@ -410,7 +409,7 @@ int connect_init(char*outside, int middle_fd,int streamid)
     memcpy(buff + 16, &(client_addr.sin_port), 2);
     
     //-----encrypt-----
-    aesctr_encrypt(buff+8,buff+8,payload_len);
+    //aesctr_encrypt(buff+8,buff+8,payload_len);
 
     total_send(middle_fd,buff,payload_len+8,"connect_init");
     printf("send to middle ok , len=%d at connect init\n",payload_len+8);
@@ -474,7 +473,7 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
 	total_recv(middle_fd,buff,payload_len,"handle_from_middle");
 
 	//-----decrypt-----
-	aesctr_encrypt(buff,buff,payload_len);
+	//aesctr_encrypt(buff,buff,payload_len);
 
 	ptr->browser_fd=connect_init(buff,middle_fd,streamid);
 
@@ -488,7 +487,7 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
 	    memcpy(buff+8,"\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00",10);
 	    
 	    //-----encrypt-----
-	    aesctr_encrypt(buff+8,buff+8,10);
+	    //aesctr_encrypt(buff+8,buff+8,10);
 
 	    total_send(middle_fd,buff,payload_len+8,"handle_from_middle");
 	    printf("connect error , send to middle len=%d to drop connection\n",payload_len+8);
@@ -518,7 +517,7 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
     printf("recv from middle ok , streamid=%d , len=%d\n",streamid,payload_len);
     
     //-----decrypt-----
-    aesctr_encrypt(buff,buff,payload_len);
+    //aesctr_encrypt(buff,buff,payload_len);
 
     total_send(ptr->browser_fd,buff,payload_len,"handle_from_middle");
 }
