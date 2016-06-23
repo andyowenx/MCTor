@@ -196,6 +196,8 @@ static void init_from_prev(struct ev_loop*loop,struct ev_io*watcher,int revents)
 	printf("accept error at init_from_prev\n");
 	return;
     }
+    
+    printf("a new connection from OP , fd=%d\n",prev_fd);
 
     struct ev_io*prev_watcher=(struct ev_io*)malloc(sizeof(struct ev_io));
     prev_watcher->data=watcher->data;
@@ -230,6 +232,7 @@ static void handle_from_both(struct ev_loop*loop,struct ev_io*watcher,int revent
 
     if (ptr==NULL && side_judge==0){
 	int*next_fd=(int*)(watcher->data);
+	printf("insert a new connection , prev=%d next=%d\n",watcher->fd,*next_fd);
 	ptr=init_cell(streamid,watcher->fd,*next_fd);
 	insert_cell(ptr);
     }
@@ -245,8 +248,11 @@ static void handle_from_both(struct ev_loop*loop,struct ev_io*watcher,int revent
 	
 
     total_recv(watcher->fd,buff+8,len,"handle_from_both");
-
-    total_send(ptr->next_fd,buff,len+8,"handle_from_both");
+    
+    if (side_judge==0)
+	total_send(ptr->next_fd,buff,len+8,"handle_from_both");
+    else
+	total_send(ptr->prev_fd,buff,len+8,"handle_from_both");
 }
 
 
