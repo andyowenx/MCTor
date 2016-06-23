@@ -10,10 +10,12 @@
 #include <signal.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <unistd.h>
+#include <netdb.h>
 #include "hidden_info.h"
 #include "aes.h"
 
-#define IS_ENTRY 1
+#define IS_ENTRY 0
 
 #if IS_ENTRY == 1
     #define NEXT_IP MIDDLE_IP
@@ -90,17 +92,19 @@ int main()
 
 int server_init(int port)
 {
-    int server_fd , option ,flag;
+    int server_fd;
+    int flag,option;
     struct sockaddr_in server_addr;
-    if ( (server_fd=socket(AF_INET,SOCK_STREAM,0)) <0 ){
-	perror("socket open error at server_init\n");
+    if ( (server_fd=socket(AF_INET,SOCK_STREAM,0)) <0){
+	perror("socket open error\n");
 	exit(1);
-    }
+    }   
 
     bzero((char*)&server_addr,sizeof(server_addr));
     server_addr.sin_family=AF_INET;
-    server_addr.sin_port=ENTRY_PORT+port;
     server_addr.sin_addr.s_addr=INADDR_ANY;
+    server_addr.sin_port=htons(port);
+
 
     if ( (flag=fcntl(server_fd,F_GETFL,0))==-1  ){  
 	perror("fcntl error in F_GETFL\n");
@@ -122,16 +126,9 @@ int server_init(int port)
 	perror("bind error\n");
 	exit(1);
     }   
-
-
-
-    if ( bind(server_fd,(struct sockaddr*)&server_addr,sizeof(server_addr)) <0  ){
-	perror("bind error at server_init\n");
-	exit(1);
-    }
-
     listen(server_fd,5000);
     return server_fd;
+
 }
 int connect_init(int port)
 {
@@ -212,7 +209,7 @@ static void handle_from_both(struct ev_loop*loop,struct ev_io*watcher,int revent
 	printf("EV_ERROR at init_from_prev\n");
 	return;
     }
-    
+
     char buff[MAXBUFF];
     uint32_t streamid,len;
     CELL_DIRECTION*ptr;
@@ -230,7 +227,7 @@ static void handle_from_both(struct ev_loop*loop,struct ev_io*watcher,int revent
     memcpy(&len,buff+4,4);
 
     ptr=search_cell(streamid);
-    
+
     if (ptr==NULL && side_judge==0){
 	int*next_fd=(int*)(watcher->data);
 	ptr=init_cell(streamid,watcher->fd,*next_fd);
