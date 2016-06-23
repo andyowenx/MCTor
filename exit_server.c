@@ -288,7 +288,7 @@ static void read_outside(struct ev_loop*loop,struct ev_io*watcher,int revents)
     }
     else{  //-----normal receive packet from browser-----
 	total_send(info->middle_fd,buff,total_len,"read_outside");
-	//printf("send to middle ok , streamid=%d , len=%d\n",info->streamid,total_len);
+	printf("send to middle , streamid=%d , len=%d\n",info->streamid,len);
     }
 }
 
@@ -396,10 +396,6 @@ int connect_init(char*outside, int middle_fd,int streamid)
 
     //-----reply outside addr info to browser-----
     payload_len=10;
-    //client_len=sizeof(client_addr);
-    //if ( getpeername(client_fd,(struct sockaddr*)&client_addr, (socklen_t*)&client_len) <0 ){
-    //	printf("getpeername error at client_init\n");
-    //}
 
     memcpy(buff,&streamid,4);
     memcpy(buff+4,&payload_len,4);
