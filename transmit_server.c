@@ -15,7 +15,7 @@
 #include "hidden_info.h"
 #include "aes.h"
 
-#define IS_ENTRY 0
+#define IS_ENTRY 1
 
 #if IS_ENTRY == 1
     #define NEXT_IP MIDDLE_IP
@@ -237,6 +237,12 @@ static void handle_from_both(struct ev_loop*loop,struct ev_io*watcher,int revent
 	printf("error at handle_from_both and it is from next , can not find the streamid\n");
 	exit(1);
     }
+    
+    if (side_judge==0)
+	printf("recv from prev , streamid=%d , len=%d\n",streamid,len);
+    else
+	printf("recv from next , streamid=%d , len=%d\n",streamid,len);
+	
 
     total_recv(watcher->fd,buff+8,len,"handle_from_both");
 
