@@ -18,4 +18,4 @@ struct ctr_state {
 
 
 int init_ctr(struct ctr_state *state, const unsigned char iv[BYTES_SIZE]);
-void aesctr_encrypt(unsigned char *indata,unsigned char *outdata ,int bytes_read);
+void aesctr_encrypt(unsigned char *indata,unsigned char *outdata ,int bytes_read , char ckey[16]);

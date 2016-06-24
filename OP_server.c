@@ -47,6 +47,7 @@ uint32_t connection_distribute(uint32_t streamid);
 static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents);
 void total_send(int fd,char *buff, uint32_t len, char func_name[]);
 void total_recv(int fd,char *buff , uint32_t len , char func_name[]);
+void total_encrypt(char*inbuff,char*outbuff,uint32_t len);
 
 void thread_func(int*id);
 
@@ -312,7 +313,7 @@ static void browser_connect_to_proxy(struct ev_loop*loop,struct ev_io*watcher,in
 	memcpy(buff+8,outside,6);
 	
 	//-----encrypt-----
-	//aesctr_encrypt(buff+8,buff+8,6);
+	total_encrypt(buff+8,buff+8,6);
 
 	total_send(entry_fd[connect_tag],buff,payload_len+8,"browser_connect_to_proxy");
 
@@ -458,7 +459,7 @@ static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 	result=recv(watcher->fd,buff+8,MAXRECV,0);
 
 	//-----encrypt payload-----
-	//aesctr_encrypt(buff+8,buff+8,result);
+	total_encrypt(buff+8,buff+8,result);
 
 
 	len=result;
@@ -590,7 +591,7 @@ void thread_func(int*id)
 
 
 		//-----decrypt payload-----
-		//aesctr_encrypt(buff,buff,payload_len);
+		total_encrypt(buff,buff,payload_len);
 
 		total_send(ptr->browser_fd,buff,payload_len,"thread_func");
 	}
@@ -632,4 +633,11 @@ void total_recv(int fd,char*buff,uint32_t len , char func_name[])
 			exit(1);
 		}
 	}
+}
+
+void total_encrypt(char*inbuff,char*outbuff,uint32_t len)
+{
+	aesctr_encrypt(inbuff,outbuff,len,EXIT_KEY);
+	aesctr_encrypt(inbuff,outbuff,len,MIDDLE_KEY);
+	aesctr_encrypt(inbuff,outbuff,len,ENTRY_KEY);
 }
