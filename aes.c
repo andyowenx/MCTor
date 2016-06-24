@@ -5,7 +5,6 @@
 #include "aes.h"
 
 AES_KEY key;
-unsigned char ckey[] =  "abcdefghijklmnop"; //-----128bit-----
 
 
 int init_ctr(struct ctr_state *state, const unsigned char iv[BYTES_SIZE]){
@@ -15,7 +14,7 @@ int init_ctr(struct ctr_state *state, const unsigned char iv[BYTES_SIZE]){
 	memcpy(state->ivec, iv, BYTES_SIZE);
 }
 
-void aesctr_encrypt(unsigned char *indata,unsigned char *outdata ,int bytes_read){
+void aesctr_encrypt(unsigned char *indata,unsigned char *outdata ,int bytes_read, char ckey[16]){
 
 	int i=0;
 	int mod_len=0;
