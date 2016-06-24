@@ -546,7 +546,6 @@ void thread_func(int*id)
 	struct ev_io*entry_watcher,*browser_watcher;
 	uint32_t streamid , payload_len;
 	char buff[MAXBUFF];
-	char decrypt_buff[MAXBUFF];
 	int i,receive_num,temp, result;
 	CONN_INFO*ptr;
 
@@ -591,7 +590,7 @@ void thread_func(int*id)
 
 
 		//-----decrypt payload-----
-		total_encrypt(buff,buff,payload_len);
+		aesctr_encrypt(buff,buff,payload_len,EXIT_KEY);
 
 		total_send(ptr->browser_fd,buff,payload_len,"thread_func");
 	}
