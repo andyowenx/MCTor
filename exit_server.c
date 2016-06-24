@@ -44,6 +44,7 @@ int server_init(int port);
 int connect_init(char*outside,int middle_fd,int streamid);
 void total_send(int fd,char*buff,uint32_t len,char func_name[]);
 void total_recv(int fd,char*buff,uint32_t len,char func_name[]);
+void total_encrypt(char*inbuff,char*outbuff,uint32_t len);
 
 void thread_func(int*id);
 static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int revents);
@@ -271,7 +272,7 @@ static void read_outside(struct ev_loop*loop,struct ev_io*watcher,int revents)
     result=recv(watcher->fd,buff+8,MAXRECV,0);
 
     //-----encrypt payload-----
-    //aesctr_encrypt(buff+8,buff+8,result);
+    total_encrypt(buff+8,buff+8,result);
 
     len=result;
     total_len=len+8;
@@ -405,7 +406,7 @@ int connect_init(char*outside, int middle_fd,int streamid)
     memcpy(buff + 16, &(client_addr.sin_port), 2);
     
     //-----encrypt-----
-    //aesctr_encrypt(buff+8,buff+8,payload_len);
+    total_encrypt(buff+8,buff+8,payload_len);
 
     total_send(middle_fd,buff,payload_len+8,"connect_init");
     printf("send to middle ok , len=%d at connect init\n",payload_len+8);
@@ -469,7 +470,7 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
 	total_recv(middle_fd,buff,payload_len,"handle_from_middle");
 
 	//-----decrypt-----
-	//aesctr_encrypt(buff,buff,payload_len);
+	aesctr_encrypt(buff,buff,payload_len,EXIT_KEY);
 
 	ptr->browser_fd=connect_init(buff,middle_fd,streamid);
 
@@ -483,7 +484,7 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
 	    memcpy(buff+8,"\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00",10);
 	    
 	    //-----encrypt-----
-	    //aesctr_encrypt(buff+8,buff+8,10);
+	    total_encrypt(buff+8,buff+8,10);
 
 	    total_send(middle_fd,buff,payload_len+8,"handle_from_middle");
 	    printf("connect error , send to middle len=%d to drop connection\n",payload_len+8);
@@ -513,7 +514,7 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
     printf("recv from middle ok , streamid=%d , len=%d\n",streamid,payload_len);
     
     //-----decrypt-----
-    //aesctr_encrypt(buff,buff,payload_len);
+    aesctr_encrypt(buff,buff,payload_len,EXIT_KEY);
 
     total_send(ptr->browser_fd,buff,payload_len,"handle_from_middle");
 }
@@ -551,4 +552,11 @@ void total_recv(int fd,char*buff,uint32_t len , char func_name[])
 	    exit(1);
 	}   
     }   
-}                  
+} 
+
+void total_encrypt(char*inbuff,char*outbuff,uint32_t len)
+{
+    aesctr_encrypt(inbuff,outbuff,len,ENTRY_KEY);
+    aesctr_encrypt(inbuff,outbuff,len,MIDDLE_KEY);
+    aesctr_encrypt(inbuff,outbuff,len,EXIT_KEY);
+}
