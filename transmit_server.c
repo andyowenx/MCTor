@@ -21,10 +21,12 @@
     #define NEXT_IP MIDDLE_IP
     #define NEXT_PORT MIDDLE_PORT
     #define MY_PORT ENTRY_PORT
+    #define MY_KEY ENTRY_KEY
 #else
     #define NEXT_IP EXIT_IP
     #define NEXT_PORT EXIT_PORT
     #define MY_PORT MIDDLE_PORT
+    #define MY_KEY MIDDLE_KEY
 #endif
 
 typedef struct cell_direction{
@@ -248,6 +250,9 @@ static void handle_from_both(struct ev_loop*loop,struct ev_io*watcher,int revent
 	
 
     total_recv(watcher->fd,buff+8,len,"handle_from_both");
+
+    //-----decrypt-----
+    aesctr_encrypt(buff+8,buff+8,len,MY_KEY);
     
     if (side_judge==0)
 	total_send(ptr->next_fd,buff,len+8,"handle_from_both");
