@@ -312,7 +312,7 @@ static void browser_connect_to_proxy(struct ev_loop*loop,struct ev_io*watcher,in
 	memcpy(buff+8,outside,6);
 	
 	//-----encrypt-----
-	aesctr_encrypt(buff+8,buff+8,6);
+	//aesctr_encrypt(buff+8,buff+8,6);
 
 	total_send(entry_fd[connect_tag],buff,payload_len+8,"browser_connect_to_proxy");
 
@@ -455,16 +455,16 @@ static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 
 
 	//-----the first eight byte is stream id and payload length-----
-	result=recv(watcher->fd,buff,MAXRECV,0);
+	result=recv(watcher->fd,buff+8,MAXRECV,0);
 
 	//-----encrypt payload-----
-	aesctr_encrypt(buff,encrypt_buff+8,result);
+	//aesctr_encrypt(buff+8,buff+8,result);
 
 
 	len=result;
 
-	memcpy(encrypt_buff,& (info->streamid),4);
-	memcpy(encrypt_buff+4,&len,4);
+	memcpy(buff,& (info->streamid),4);
+	memcpy(buff+4,&len,4);
 
 	//-----end of connection-----
 	if (result<=0){
@@ -477,7 +477,7 @@ static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 	}
 	else{  //-----normal receive packet from browser-----
 		//printf("send to stream id : %d , len = %d\n",info->streamid,len);
-		total_send(entry_fd[info->thread_id],encrypt_buff,len+8,"read_browser");
+		total_send(entry_fd[info->thread_id],buff,len+8,"read_browser");
 		printf("send to entry ok , streamid=%d , len=%d\n",info->streamid,len+8);
 	}
 }
@@ -590,9 +590,9 @@ void thread_func(int*id)
 
 
 		//-----decrypt payload-----
-		aesctr_encrypt(buff,decrypt_buff,payload_len);
+		//aesctr_encrypt(buff,buff,payload_len);
 
-		total_send(ptr->browser_fd,decrypt_buff,payload_len,"thread_func");
+		total_send(ptr->browser_fd,buff,payload_len,"thread_func");
 	}
 	return;
 }
