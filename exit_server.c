@@ -330,7 +330,7 @@ void total_encrypt(char*inbuff,char*outbuff,uint32_t len)
 {
     if (len<0 || len>4096)
 	return;
-    aesctr_encrypt(inbuff,outbuff,len,EXIT_KEY);
+    aesctr_encrypt(inbuff,outbuff,len,OP_KEY);
     aesctr_encrypt(inbuff,outbuff,len,ENTRY_KEY);
     aesctr_encrypt(inbuff,outbuff,len,MIDDLE_KEY);
 
