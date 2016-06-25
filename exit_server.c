@@ -5,115 +5,66 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <resolv.h>
-#include <openssl/ssl.h>
-#include <openssl/aes.h>
-#include <openssl/err.h>
-#include <pthread.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <signal.h>
 #include <ev.h>
-#include <netdb.h>
+#include <signal.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <netdb.h>
 #include "hidden_info.h"
 #include "aes.h"
 
-typedef struct conn_info{
-    struct conn_info*next;
-    uint32_t browser_fd;
+
+typedef struct cell_direction{
+    struct cell_direction*next;
     uint32_t streamid;
-    uint32_t thread_id;
-    int middle_fd;
-    struct ev_io*watcher;
-}CONN_INFO;
+    int next_fd,prev_fd;
+}CELL_DIRECTION;
 
-//pthread_mutex_t lock;
-CONN_INFO thread_head[THREAD_NUM];
+CELL_DIRECTION*cell_head;
 
-uint32_t streamid_master=0;
-int exit_fd[THREAD_NUM];
 
-struct ev_loop*thread_loop[THREAD_NUM];
+struct ev_loop*my_loop=NULL;
 
-SSL_CTX* InitServerCTX(void);
-void LoadCertificates(SSL_CTX* ctx, char* CertFile, char* KeyFile);
-void ShowCerts(SSL* ssl);
-void Servlet(SSL* ssl);
+static void init_from_middle(struct ev_loop*loop,struct ev_io*watcher,int revents);
+static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int revents);
+static void handle_from_outside(struct ev_loop*loop,struct ev_io*watcher,int revents);
 
 int server_init(int port);
-int connect_init(char*outside,int middle_fd,int streamid);
-void total_send(int fd,char*buff,uint32_t len,char func_name[]);
-void total_recv(int fd,char*buff,uint32_t len,char func_name[]);
+int connect_init(char*outside, int middle_fd,uint32_t streamid);
+
+
+CELL_DIRECTION*init_cell(uint32_t streamid,int prev_fd,int next_fd);
+void insert_cell(CELL_DIRECTION*ptr);
+CELL_DIRECTION*search_cell(uint32_t streamid);
+void total_recv(int fd,char*buff,uint32_t size,char func_name[]);
+void total_send(int fd,char*buff,uint32_t size,char func_name[]);
 void total_encrypt(char*inbuff,char*outbuff,uint32_t len);
 
-void thread_func(int*id);
-static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int revents);
-static void read_outside(struct ev_loop*loop,struct ev_io*watcher,int revents);
-
-CONN_INFO*info_init(int browser_fd,int streamid,int thread_id,int middle_fd);
-void info_insert(CONN_INFO*head,CONN_INFO*tag);
-void info_delete(CONN_INFO*head,CONN_INFO*tag);
-CONN_INFO*info_search(CONN_INFO*head,int streamid);
 
 int main()
 {
-    //SSL_library_init();
-    /*
-       if (  pthread_mutex_init(&lock,NULL) !=0){
-       printf("pthread mutex fail\n");
-       exit(1);
-       }
-       if (pthread_mutex_init(&lock,NULL)!=0){
-       printf("mutex lock init error\n");
-       exit(1);
-       }
-     */
     signal(SIGPIPE,SIG_IGN);
-    struct ev_io fd;
-    pthread_t thread[THREAD_NUM];
-    int i,thread_id[THREAD_NUM];
+    int server_fd[THREAD_NUM];
+    int i;
+    struct ev_io*server_watcher,*next_watcher;
 
+    my_loop=ev_default_loop(0);
 
     for (i=0;i<THREAD_NUM;i++){
-	thread_id[i]=i;
-	thread_loop[i]=NULL;
-	thread_head[i].browser_fd=-1;
-	thread_head[i].streamid=-1;
-	thread_head[i].thread_id=-1;
-	thread_head[i].middle_fd=-1;
-	thread_head[i].next=NULL;
-	pthread_create(&thread[i],NULL,(void*)thread_func,(void*)&thread_id[i]);
+	server_fd[i]=server_init(EXIT_PORT+i);
+
+
+	server_watcher=(struct ev_io*)malloc(sizeof(struct ev_io));
+
+	ev_io_init(server_watcher,init_from_middle,server_fd[i],EV_READ);
+	ev_io_start(my_loop,server_watcher);
+
     }
 
-    for (i=0;i<THREAD_NUM;i++)
-	pthread_join(thread[i],0);
+    ev_loop(my_loop,0);
 
-    //my_loop=ev_default_loop(0);
-
-    //ev_io_init(&fd,browser_connect_to_proxy,server_fd,EV_READ);
-    //ev_io_start(my_loop,&fd);
-    //ev_loop(my_loop,0);
-
-    /*
-    //SSL_CTX *ctx;
-    //ctx=InitServerCTX();
-    //LoadCertificates(ctx,CA,KEY);
-    while (1){
-    printf("into accept\n");
-    if (  (client_fd=accept(server_fd,  (struct sockaddr*)&client_addr,      &client_len)) <0){
-    perror("accept error\n");
-    exit(1);
-    }
-    //	SSL *ssl;
-    //	ssl=SSL_new(ctx);
-    //	SSL_set_fd(ssl,client_fd);
-    //	Servlet(ssl);
-    //	printf("ssl success\n");
-    }
-    close(server_fd);
-    //SSL_CTX_free(ctx);
-    //AES_KEY enc_key, dec_key;
-     */
     return 0;
 }
 
@@ -121,233 +72,44 @@ int main()
 int server_init(int port)
 {
     int server_fd;
-    int flag,option=1;
+    int flag,option;
     struct sockaddr_in server_addr;
     if ( (server_fd=socket(AF_INET,SOCK_STREAM,0)) <0){
 	perror("socket open error\n");
 	exit(1);
-    }
+    }   
 
     bzero((char*)&server_addr,sizeof(server_addr));
     server_addr.sin_family=AF_INET;
     server_addr.sin_addr.s_addr=INADDR_ANY;
     server_addr.sin_port=htons(port);
-    /*
-       if ( (flag=fcntl(server_fd,F_GETFL,0))==-1  ){
-       perror("fcntl error in F_GETFL\n");
-       exit(1);
-       }
-       if (fcntl(server_fd,F_SETFL,flag|O_NONBLOCK)==-1  ){
-       perror("fcntl error in F_SETFL\n");
-       exit(1);
-       }
 
-       option=1;
-       if (  setsockopt(server_fd,SOL_SOCKET,SO_REUSEADDR,(uint*)&option , sizeof(option)) ==-1    ){
-       perror("setsockopt error\n");
-       exit(1);
-       }
-     */
-    if  ( bind(server_fd,(struct sockaddr*)&server_addr,sizeof(server_addr)) <0  ){
+
+    if ( (flag=fcntl(server_fd,F_GETFL,0))==-1  ){  
+	perror("fcntl error in F_GETFL\n");
+	exit(1);
+    }   
+    if (fcntl(server_fd,F_SETFL,flag|O_NONBLOCK)==-1  ){  
+	perror("fcntl error in F_SETFL\n");
+	exit(1);
+    }   
+
+    option=1;
+    if (  setsockopt(server_fd,SOL_SOCKET,SO_REUSEADDR,(uint*)&option , sizeof(option)) ==-1    ){  
+	perror("setsockopt error\n");
+	exit(1);
+    }   
+
+
+    if  ( bind(server_fd,(struct sockaddr*)&server_addr,sizeof(server_addr)) <0  ){  
 	perror("bind error\n");
 	exit(1);
-    }
-
+    }   
     listen(server_fd,5000);
     return server_fd;
+
 }
-
-SSL_CTX* InitServerCTX(void)
-{   const SSL_METHOD *method;
-    SSL_CTX *ctx;
-
-    OpenSSL_add_all_algorithms();		/* load & register all cryptos, etc. */
-    SSL_load_error_strings();			/* load all error messages */
-    method = SSLv23_server_method();		/* create new server-method instance */
-    ctx = SSL_CTX_new(method);			/* create new context from method */
-    if ( ctx == NULL )
-    {
-	ERR_print_errors_fp(stderr);
-	abort();
-    }
-    return ctx;
-}
-
-void LoadCertificates(SSL_CTX* ctx, char* CertFile, char* KeyFile)
-{
-    /* set the local certificate from CertFile */
-    if ( SSL_CTX_use_certificate_file(ctx, CertFile, SSL_FILETYPE_PEM) <= 0 )
-    {
-	ERR_print_errors_fp(stderr);
-	abort();
-    }
-    /* set the private key from KeyFile (may be the same as CertFile) */
-    if ( SSL_CTX_use_PrivateKey_file(ctx, KeyFile, SSL_FILETYPE_PEM) <= 0 )
-    {
-	ERR_print_errors_fp(stderr);
-	abort();
-    }
-    /* verify private key */
-    if ( !SSL_CTX_check_private_key(ctx) )
-    {
-	fprintf(stderr, "Private key does not match the public certificate\n");
-	abort();
-    }
-}
-
-void ShowCerts(SSL* ssl)
-{   X509 *cert;
-    char *line;
-
-    cert = SSL_get_peer_certificate(ssl);	/* Get certificates (if available) */
-    if ( cert != NULL )
-    {
-	printf("Server certificates:\n");
-	line = X509_NAME_oneline(X509_get_subject_name(cert), 0, 0);
-	printf("Subject: %s\n", line);
-	free(line);
-	line = X509_NAME_oneline(X509_get_issuer_name(cert), 0, 0);
-	printf("Issuer: %s\n", line);
-	free(line);
-	X509_free(cert);
-    }
-    else
-	printf("No certificates.\n");
-
-
-    X509 *x509;
-    BIO *i = BIO_new(BIO_s_file());
-    BIO *o = BIO_new_fp(stdout,BIO_NOCLOSE);
-
-    if(		(BIO_read_filename(i, CA) <= 0) ||
-	    ((x509 = PEM_read_bio_X509_AUX(i, NULL, NULL, NULL)) == NULL)) {
-	printf("cannot print CA\n");
-    }
-    else
-	X509_print_ex(o, x509, XN_FLAG_COMPAT, X509_FLAG_COMPAT);
-}
-
-void Servlet(SSL* ssl)	/* Serve the connection -- threadable */
-{   char buf[1024];
-    char reply[1024];
-    int sd, bytes;
-    const char* HTMLecho="<html><body><pre>%s</pre></body></html>\n\n";
-
-    if ( SSL_accept(ssl) == -1 )					/* do SSL-protocol accept */
-	ERR_print_errors_fp(stderr);
-    else
-    {
-	ShowCerts(ssl);								/* get any certificates */
-	bytes = SSL_read(ssl, buf, sizeof(buf));	/* get request */
-	if ( bytes > 0 )
-	{
-	    buf[bytes] = 0;
-	    printf("Client msg: \"%s\"\n", buf);
-	    sprintf(reply, HTMLecho, buf);			/* construct reply */
-	    SSL_write(ssl, reply, strlen(reply));	/* send reply */
-	}
-	else
-	    ERR_print_errors_fp(stderr);
-    }
-    sd = SSL_get_fd(ssl);							/* get socket connection */
-    SSL_free(ssl);									/* release SSL state */
-    close(sd);										/* close connection */
-}
-
-
-static void read_outside(struct ev_loop*loop,struct ev_io*watcher,int revents)
-{
-    char buff[MAXBUFF];
-    ssize_t result;
-    uint32_t len;
-    uint32_t total_len,temp;
-    if (EV_ERROR & revents){
-	printf("revents error at read browser\n");
-	return;
-    }
-
-    CONN_INFO*info=(CONN_INFO*)watcher->data;
-
-    //-----the first eight bytes are stream id and payload length
-    result=recv(watcher->fd,buff+8,MAXRECV,0);
-
-    //-----encrypt payload-----
-    total_encrypt(buff+8,buff+8,result);
-
-    len=result;
-    total_len=len+8;
-    memcpy(buff,&(info->streamid),4);
-    memcpy(buff+4,&len,4);
-
-    //-----end of connection-----
-    if (result<=0){
-	//ev_io_stop(thread_loop[info->thread_id],watcher);
-	info_delete(&thread_head[info->thread_id],info);
-	//if (watcher->fd)
-	//    close(watcher->fd);
-	//free(watcher);
-    }
-    else{  //-----normal receive packet from browser-----
-	total_send(info->middle_fd,buff,total_len,"read_outside");
-	printf("send to middle , streamid=%d , len=%d\n",info->streamid,len);
-    }
-}
-
-CONN_INFO*info_init(int browser_fd,int streamid,int thread_id,int middle_fd)
-{
-    CONN_INFO*info=(CONN_INFO*)malloc(sizeof(CONN_INFO));
-    info->next=NULL;
-    info->browser_fd=browser_fd;
-    info->streamid=streamid;
-    info->thread_id=thread_id;
-    info->middle_fd=middle_fd;
-    info->watcher=NULL;
-    return info;
-}
-
-void info_insert(CONN_INFO*head,CONN_INFO*tag)
-{
-    //pthread_mutex_lock(&lock);
-    CONN_INFO*walker;
-
-    for (walker=head;walker->next!=NULL;walker=walker->next)//-----get the last node-----
-	;
-
-    walker->next=tag;
-    tag->next=NULL;
-    //pthread_mutex_unlock(&lock);
-    return;
-}
-void info_delete(CONN_INFO*head,CONN_INFO*tag)
-{
-    //pthread_mutex_lock(&lock);
-    CONN_INFO*walker,*prev;
-    int tag_streamid=tag->streamid;
-
-    for (walker=head->next,prev=head;walker!=NULL;walker=walker->next){
-	if (walker->streamid==tag_streamid){
-	    prev->next=walker->next;
-	    ev_io_stop(thread_loop[walker->thread_id],walker->watcher);
-	    free(walker->watcher);
-	    close(walker->browser_fd);
-	    free(walker);
-	    return;
-	}
-	prev=walker;
-    }
-    //pthread_mutex_unlock(&lock);
-}
-CONN_INFO*info_search(CONN_INFO*head,int streamid)
-{
-    CONN_INFO*walker;
-    for (walker=head;walker!=NULL;walker=walker->next){
-	if (walker->streamid==streamid)
-	    return walker;
-    }
-    return NULL;
-}
-
-int connect_init(char*outside, int middle_fd,int streamid)
+int connect_init(char*outside, int middle_fd,uint32_t streamid)
 {
     int client_fd,client_len;
     struct sockaddr_in client_addr;
@@ -366,15 +128,15 @@ int connect_init(char*outside, int middle_fd,int streamid)
 
     printf("connect to %s:%d\n",inet_ntoa(client_addr.sin_addr),ntohs(client_addr.sin_port));
 
-    if ( (client_fd=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP))  <0   ){
+    if ( (client_fd=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP))  <0   ){  
 	printf("client socket initial error\n");
-	return -1;
-    }
+	return -1; 
+    }   
 
     time_opt.tv_sec=2;
     time_opt.tv_usec=0;
     if (  setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&time_opt, sizeof(time_opt)) ==-1 
-	    ||  setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, (char *)&time_opt, sizeof(time_opt)) ==-1 ) {
+	    ||  setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, (char *)&time_opt, sizeof(time_opt)) ==-1 ) { 
 	printf("setsocket error at client init\n");
 	return -1; 
     }   
@@ -383,18 +145,17 @@ int connect_init(char*outside, int middle_fd,int streamid)
     setsockopt(sockfd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
 #endif
 
-    if ( setsockopt(client_fd, SOL_SOCKET, SO_REUSEADDR, (uint *)&option, sizeof(option)) ==-1  ) {
+    if ( setsockopt(client_fd, SOL_SOCKET, SO_REUSEADDR, (uint *)&option, sizeof(option)) ==-1  ) { 
 	printf("setsocket error at client init\n");
 	return -1; 
-    }
+    }   
 
 
 
-    if ( connect(client_fd,(struct sockaddr*)&client_addr,sizeof(client_addr)) <0  ){
+    if ( connect(client_fd,(struct sockaddr*)&client_addr,sizeof(client_addr)) <0  ){  
 	printf("connect error at client_init , %s\n",strerror(errno));
-	return -1;
-    }
-
+	return -1; 
+    }   
     //-----reply outside addr info to browser-----
     payload_len=10;
 
@@ -404,119 +165,130 @@ int connect_init(char*outside, int middle_fd,int streamid)
     memcpy(buff+8, "\x05\x00\x00\x01", 4);                                  
     memcpy(buff + 12, &(client_addr.sin_addr.s_addr), 4);
     memcpy(buff + 16, &(client_addr.sin_port), 2);
-    
+
     //-----encrypt-----
     total_encrypt(buff+8,buff+8,payload_len);
 
     total_send(middle_fd,buff,payload_len+8,"connect_init");
-    printf("send to middle ok , len=%d at connect init\n",payload_len+8);
+    //printf("send to middle ok , len=%d at connect init\n",payload_len+8);
 
     return client_fd;
+
 }
 
-void thread_func(int*id)
+static void init_from_middle(struct ev_loop*loop,struct ev_io*watcher,int revents)
 {
-    int middle_fd , middle_len;
-    struct sockaddr_in middle_addr;
-    middle_len=sizeof(middle_addr);
 
-    exit_fd[*id]=server_init(EXIT_PORT+*id);
-    if ( (middle_fd=accept(exit_fd[*id],(struct sockaddr*)&middle_addr,&middle_len)) <0 ){
-	printf("accept error at handle_from_middle , %s\n",strerror(errno));
+    if (revents&EV_ERROR){
+	printf("EV_ERROR at init_from_middle\n");
 	return;
-    }
+    }   
 
+    int prev_fd , prev_len;
+    struct sockaddr_in prev_addr;
+    prev_len=sizeof(prev_addr);
 
-    thread_loop[*id]=ev_loop_new(0);
-    struct ev_io*exit_watcher=(struct ev_io*)malloc(sizeof(struct ev_io));
-    exit_watcher->data=(void*)id;
+    if ( (prev_fd=accept(watcher->fd,(struct sockaddr*)&prev_addr,&prev_len)) <0   ){  
+	printf("accept error at init_from_middle\n");
+	return;
+    }   
 
-    ev_io_init(exit_watcher, handle_from_middle , middle_fd, EV_READ);
-    ev_io_start(thread_loop[*id],exit_watcher);
+    struct ev_io*prev_watcher=(struct ev_io*)malloc(sizeof(struct ev_io));
 
-    ev_loop(thread_loop[*id],0);
-
-    return;
+    ev_io_init(prev_watcher,handle_from_middle,prev_fd,EV_READ);
+    ev_io_start(my_loop,prev_watcher);
 }
+
 
 static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int revents)
-{
-    if ( EV_ERROR &revents  ){
-	printf("EV_ERROR at handle_from_mddle\n");
+{   
+    if (revents&EV_ERROR){
+	printf("EV_ERROR at handle_from_middle\n");
 	return;
     }
 
-    uint32_t streamid , payload_len;
     char buff[MAXBUFF];
-    CONN_INFO*ptr;
-    int*id=(int*)watcher->data ,i;
-    struct ev_io *outside_watcher;
-    int middle_fd=watcher->fd  , temp , receive_num,total_len,result;
-    struct sockaddr_in middle_addr;
+    uint32_t streamid,len;
+    CELL_DIRECTION*ptr;
 
-    total_recv(middle_fd,buff,4,"handle_from_middle");
+    total_recv(watcher->fd,buff,4,"handle_from_middle");
     memcpy(&streamid,buff,4);
-    ptr=info_search(&thread_head[*id],streamid);
-    //-----new connection incoming-----
+    total_recv(watcher->fd,buff+4,4,"handle_from_middle");
+    memcpy(&len,buff+4,4);
+
+    ptr=search_cell(streamid);
+
+
+    //printf("recv from middle , streamid=%d , len=%d\n",streamid,len);
+
+    total_recv(watcher->fd,buff+8,len,"handle_from_both");
+
+    //-----decrypt-----
+    //if (len>0 && len <=4096)
+    	aesctr_encrypt(buff+8,buff+8,len,EXIT_KEY);
+
     if (ptr==NULL){
-	ptr=info_init(-1,streamid,*id,middle_fd);
-	total_recv(middle_fd,buff,4,"handle_from_middle");
-	memcpy(&payload_len,buff,4);
-	
-	if (payload_len <0 || payload_len >4500){
-	    printf("payload length error , streamid=%d , payload_len=%d at handle_from_middle\n",streamid,payload_len);
-	    exit(1);
-	}
-	total_recv(middle_fd,buff,payload_len,"handle_from_middle");
-
-	//-----decrypt-----
-	aesctr_encrypt(buff,buff,payload_len,EXIT_KEY);
-
-	ptr->browser_fd=connect_init(buff,middle_fd,streamid);
-
-	if (ptr->browser_fd==-1){
-	    free(ptr);
-
-	    payload_len=10;
+	int outside_fd=connect_init(buff+8,watcher->fd,streamid);
+	if (outside_fd==-1){
+	    len=10;
 
 	    memcpy(buff,&streamid,4);
-	    memcpy(buff+4,&payload_len,4);
+	    memcpy(buff+4,&len,4);
 	    memcpy(buff+8,"\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00",10);
-	    
+
 	    //-----encrypt-----
 	    total_encrypt(buff+8,buff+8,10);
 
-	    total_send(middle_fd,buff,payload_len+8,"handle_from_middle");
-	    printf("connect error , send to middle len=%d to drop connection\n",payload_len+8);
+	    total_send(watcher->fd,buff,len+8,"handle_from_middle");
+	    printf("connect error , send to middle len=%d to drop connection\n",len);
+
 	    return;
 	}
-	info_insert(&thread_head[*id],ptr);
 
-	outside_watcher=(struct ev_io*)malloc(sizeof(struct ev_io));
+	ptr=init_cell(streamid,watcher->fd,outside_fd);
+	insert_cell(ptr);
+
+	struct ev_io*outside_watcher=(struct ev_io*)malloc(sizeof(struct ev_io));
 	outside_watcher->data=(void*)ptr;
 
-	//-----part of initial ev_io-----
-	ptr->watcher=outside_watcher;
+	ev_io_init(outside_watcher,handle_from_outside,outside_fd,EV_READ);
+	ev_io_start(my_loop,outside_watcher);
+    }
+    else
+	total_send(ptr->next_fd,buff+8,len,"handle_from_middle");
+}
 
-	ev_io_init(outside_watcher, read_outside ,ptr->browser_fd , EV_READ);
-	ev_io_start(thread_loop[*id],outside_watcher);
+static void handle_from_outside(struct ev_loop*loop,struct ev_io*watcher,int revents)
+{
+    char buff[MAXBUFF];
+    int result;
+    uint32_t len;
+    if (EV_ERROR & revents){
+	printf("revents error at read browser\n");
 	return;
     }
-    
-    total_recv(middle_fd,buff,4,"handle_from_middle");
-    memcpy(&payload_len,buff,4);
-    if (payload_len < 0 || payload_len > 8096){
-	printf("payload length error , streamid=%d , payload_len=%d at handle_from_middle\n",streamid,payload_len);
-	exit(1);
-    }
-    
-    total_recv(middle_fd,buff,payload_len,"handle_from_middle");
-    printf("recv from middle ok , streamid=%d , len=%d\n",streamid,payload_len);
-    
-    //-----decrypt-----
-    aesctr_encrypt(buff,buff,payload_len,EXIT_KEY);
 
-    total_send(ptr->browser_fd,buff,payload_len,"handle_from_middle");
+    CELL_DIRECTION*ptr=(CELL_DIRECTION*)watcher->data;
+
+    //-----the first eight bytes are stream id and payload length
+    result=recv(watcher->fd,buff+8,MAXRECV,0);
+
+    if (result<=0){
+	ev_io_stop(my_loop,watcher);
+	free(watcher);
+	return;
+    }
+
+    //-----encrypt payload-----
+    total_encrypt(buff+8,buff+8,result);
+
+    len=result;
+    memcpy(buff,&(ptr->streamid),4);
+    memcpy(buff+4,&len,4);
+
+    total_send(ptr->prev_fd,buff,len+8,"handle_from_outside");
+    printf("send to middle , streamid=%d , len=%d\n",ptr->streamid,len);
+
 }
 
 void total_send(int fd,char*buff,uint32_t len , char func_name[])
@@ -552,11 +324,48 @@ void total_recv(int fd,char*buff,uint32_t len , char func_name[])
 	    exit(1);
 	}   
     }   
-} 
+}
 
 void total_encrypt(char*inbuff,char*outbuff,uint32_t len)
 {
+    if (len<0 || len>4096)
+	return;
+    aesctr_encrypt(inbuff,outbuff,len,EXIT_KEY);
     aesctr_encrypt(inbuff,outbuff,len,ENTRY_KEY);
     aesctr_encrypt(inbuff,outbuff,len,MIDDLE_KEY);
-    aesctr_encrypt(inbuff,outbuff,len,EXIT_KEY);
+
+}
+
+CELL_DIRECTION*init_cell(uint32_t streamid,int prev_fd,int next_fd)
+{
+    CELL_DIRECTION*ptr=(CELL_DIRECTION*)malloc(sizeof(CELL_DIRECTION));
+    ptr->next=NULL;
+    ptr->streamid=streamid;
+    ptr->prev_fd=prev_fd;
+    ptr->next_fd=next_fd;
+}
+
+void insert_cell(CELL_DIRECTION*ptr)
+{
+    CELL_DIRECTION*walker;
+    if (cell_head==NULL){
+	cell_head=ptr;
+	return;
+    }
+
+    for(walker=cell_head;walker->next!=NULL;walker=walker->next)
+	;
+
+    walker->next=ptr;
+}
+
+CELL_DIRECTION*search_cell(uint32_t streamid)
+{
+    CELL_DIRECTION*walker;
+    for ( walker=cell_head;walker!=NULL;walker=walker->next  ){
+	if (walker->streamid==streamid)
+	    return walker;
+    }
+
+    return NULL;
 }
