@@ -313,7 +313,9 @@ static void browser_connect_to_proxy(struct ev_loop*loop,struct ev_io*watcher,in
 	memcpy(buff+8,outside,6);
 	
 	//-----encrypt-----
+#if ENCRYPT_JUDGE > 0
 	total_encrypt(buff+8,buff+8,6);
+#endif
 
 	total_send(entry_fd[connect_tag],buff,payload_len+8,"browser_connect_to_proxy");
 
@@ -479,7 +481,9 @@ static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 
 
 		//-----encrypt payload-----
+#if ENCRYPT_JUDGE > 0
 		total_encrypt(buff+8,buff+8,result);
+#endif
 
 		total_send(entry_fd[info->thread_id],buff,len+8,"read_browser");
 		printf("send to entry ok , streamid=%d , len=%d\n",info->streamid,len+8);
@@ -593,7 +597,9 @@ void thread_func(int*id)
 
 
 		//-----decrypt payload-----
+#if ENCRYPT_JUDGE > 0
 		aesctr_encrypt(buff,buff,payload_len,OP_KEY);
+#endif
 
 		total_send(ptr->browser_fd,buff,payload_len,"thread_func");
 	}

@@ -167,7 +167,9 @@ int connect_init(char*outside, int middle_fd,uint32_t streamid)
     memcpy(buff + 16, &(client_addr.sin_port), 2);
 
     //-----encrypt-----
+#if ENCRYPT_JUDGE >0
     total_encrypt(buff+8,buff+8,payload_len);
+#endif
 
     total_send(middle_fd,buff,payload_len+8,"connect_init");
     //printf("send to middle ok , len=%d at connect init\n",payload_len+8);
@@ -224,8 +226,10 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
     total_recv(watcher->fd,buff+8,len,"handle_from_both");
 
     //-----decrypt-----
-    //if (len>0 && len <=4096)
+#if ENCRYPT_JUDGE > 0
+    if (len>0 && len <=4096)
     	aesctr_encrypt(buff+8,buff+8,len,EXIT_KEY);
+#endif
 
     if (ptr==NULL){
 	int outside_fd=connect_init(buff+8,watcher->fd,streamid);
@@ -237,7 +241,9 @@ static void handle_from_middle(struct ev_loop*loop,struct ev_io*watcher,int reve
 	    memcpy(buff+8,"\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00",10);
 
 	    //-----encrypt-----
+#if ENCRYPT_JUDGE > 0
 	    total_encrypt(buff+8,buff+8,10);
+#endif
 
 	    total_send(watcher->fd,buff,len+8,"handle_from_middle");
 	    printf("connect error , send to middle len=%d to drop connection\n",len);
@@ -280,7 +286,9 @@ static void handle_from_outside(struct ev_loop*loop,struct ev_io*watcher,int rev
     }
 
     //-----encrypt payload-----
+#if ENCRYPT_JUDGE > 0
     total_encrypt(buff+8,buff+8,result);
+#endif
 
     len=result;
     memcpy(buff,&(ptr->streamid),4);

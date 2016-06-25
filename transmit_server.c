@@ -252,7 +252,9 @@ static void handle_from_both(struct ev_loop*loop,struct ev_io*watcher,int revent
     total_recv(watcher->fd,buff+8,len,"handle_from_both");
 
     //-----decrypt-----
+#if ENCRYPT_JUDGE > 0
     aesctr_encrypt(buff+8,buff+8,len,MY_KEY);
+#endif
     
     if (side_judge==0)
 	total_send(ptr->next_fd,buff,len+8,"handle_from_both");
