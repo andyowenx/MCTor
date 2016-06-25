@@ -445,8 +445,8 @@ uint32_t connection_distribute(uint32_t streamid)
 static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 {
 	char buff[MAXBUFF];
-	char encrypt_buff[MAXBUFF];
-	uint32_t len,temp,result;
+	uint32_t len,temp;
+	int result;
 	if (EV_ERROR & revents){
 		printf("revents error at read browser\n");
 		return;
@@ -458,8 +458,6 @@ static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 	//-----the first eight byte is stream id and payload length-----
 	result=recv(watcher->fd,buff+8,MAXRECV,0);
 
-	//-----encrypt payload-----
-	total_encrypt(buff+8,buff+8,result);
 
 
 	len=result;
@@ -478,6 +476,11 @@ static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 	}
 	else{  //-----normal receive packet from browser-----
 		//printf("send to stream id : %d , len = %d\n",info->streamid,len);
+
+
+		//-----encrypt payload-----
+		total_encrypt(buff+8,buff+8,result);
+
 		total_send(entry_fd[info->thread_id],buff,len+8,"read_browser");
 		printf("send to entry ok , streamid=%d , len=%d\n",info->streamid,len+8);
 	}
@@ -518,8 +521,8 @@ void info_delete(CONN_INFO*head,CONN_INFO*tag)
 		if (walker->streamid==tag_streamid){
 			prev->next=walker->next;
 			ev_io_stop(my_loop,walker->watcher);
-			free(walker->watcher);
-			close(walker->browser_fd);
+			//free(walker->watcher);
+			//close(walker->browser_fd);
 			free(walker);
 			return;
 		}
@@ -586,11 +589,11 @@ void thread_func(int*id)
 
 		total_recv(entry_fd[*id],buff,payload_len,"thread_func");
 
-		//printf("recv from entry ok , streamid=%d , len=%d\n",streamid,payload_len+8);
+		printf("recv from entry ok , streamid=%d , len=%d\n",streamid,payload_len);
 
 
 		//-----decrypt payload-----
-		aesctr_encrypt(buff,buff,payload_len,EXIT_KEY);
+		aesctr_encrypt(buff,buff,payload_len,OP_KEY);
 
 		total_send(ptr->browser_fd,buff,payload_len,"thread_func");
 	}
@@ -636,6 +639,8 @@ void total_recv(int fd,char*buff,uint32_t len , char func_name[])
 
 void total_encrypt(char*inbuff,char*outbuff,uint32_t len)
 {
+	if (len < 0 || len > 4096)
+		return;
 	aesctr_encrypt(inbuff,outbuff,len,EXIT_KEY);
 	aesctr_encrypt(inbuff,outbuff,len,MIDDLE_KEY);
 	aesctr_encrypt(inbuff,outbuff,len,ENTRY_KEY);
