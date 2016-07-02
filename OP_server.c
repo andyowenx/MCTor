@@ -7,6 +7,7 @@
 #include <resolv.h>
 #include <openssl/ssl.h>
 #include <openssl/aes.h>
+#include <openssl/md5.h>
 #include <openssl/err.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -43,7 +44,7 @@ static void browser_connect_to_proxy(struct ev_loop*loop,struct ev_io*watcher,in
 char* getOutsideAddr(int browser_fd);
 void sock_auth_fail(int step,int kind);
 uint32_t get_stream_id();
-uint32_t connection_distribute(uint32_t streamid);
+uint32_t connection_distribute(uint32_t streamid,struct sockaddr_in*browser_addr,char*outside);
 static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents);
 void total_send(int fd,char *buff, uint32_t len, char func_name[]);
 void total_recv(int fd,char *buff , uint32_t len , char func_name[]);
@@ -303,7 +304,8 @@ static void browser_connect_to_proxy(struct ev_loop*loop,struct ev_io*watcher,in
 
 	payload_len=6;
 	streamid=get_stream_id();
-	connect_tag=connection_distribute(streamid);
+	connect_tag=connection_distribute(streamid,&browser_addr,outside);
+	printf("stream id=%d , connection distribute=%d\n",streamid,connect_tag);
 	//-----send outside addr to exit node-----
 	CONN_INFO*info=info_init(browser_fd,streamid,connect_tag);
 	info_insert(&thread_head[connect_tag],info);
@@ -439,8 +441,33 @@ uint32_t get_stream_id(void)
 	return streamid_master++;
 }
 
-uint32_t connection_distribute(uint32_t streamid)
+uint32_t connection_distribute(uint32_t streamid,struct sockaddr_in*browser_addr,char * outside)
 {
+	//-----md5 hash method-----
+	if (HASH_METHOD > 0){
+		unsigned char md5_str[MD5_DIGEST_LENGTH];//-----MD5_DIGEST_LENGTH=16-----
+		uint32_t temp,result=0;
+		int i;
+		MD5_CTX md5content;
+		char buff[MAXBUFF];
+
+		//-----IP and port of both side merge to a string-----
+		memcpy(buff,&browser_addr->sin_addr.s_addr,4);
+		memcpy(buff+4,&browser_addr->sin_port,2);
+		memcpy(buff+6,outside,6);
+
+		MD5_Init(&md5content);
+		MD5_Update(&md5content,buff,12);
+		MD5_Final(md5_str,&md5content);
+
+		for (i=0;i<MD5_DIGEST_LENGTH;i+=4){
+			memcpy(&temp,md5_str+i,4);
+			result+=temp%THREAD_NUM;
+		}
+		result%=THREAD_NUM;
+		return result;
+	}
+	//-----uniform method-----
 	return streamid%THREAD_NUM;
 }
 
@@ -486,7 +513,9 @@ static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents)
 #endif
 
 		total_send(entry_fd[info->thread_id],buff,len+8,"read_browser");
+#if DEBUG > 0
 		printf("send to entry ok , streamid=%d , len=%d\n",info->streamid,len+8);
+#endif
 	}
 }
 
@@ -592,8 +621,9 @@ void thread_func(int*id)
 		}
 
 		total_recv(entry_fd[*id],buff,payload_len,"thread_func");
-
+#if DEBUG > 0
 		printf("recv from entry ok , streamid=%d , len=%d\n",streamid,payload_len);
+#endif
 
 
 		//-----decrypt payload-----
