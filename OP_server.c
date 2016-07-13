@@ -9,7 +9,6 @@
 #include <openssl/aes.h>
 #include <openssl/md5.h>
 #include <openssl/err.h>
-#include <pthread.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -27,7 +26,6 @@ typedef struct conn_info{
 }CONN_INFO;
 
 CONN_INFO thread_head[THREAD_NUM];
-pthread_mutex_t lock;
 
 uint32_t streamid_master=0;
 int entry_fd[THREAD_NUM];
@@ -45,12 +43,13 @@ char* getOutsideAddr(int browser_fd);
 void sock_auth_fail(int step,int kind);
 uint32_t get_stream_id();
 uint32_t connection_distribute(uint32_t streamid,struct sockaddr_in*browser_addr,char*outside);
+int connect_init(int port,int id);
 static void read_browser(struct ev_loop*loop,struct ev_io*watcher,int revents);
+static void handle_from_entry(struct ev_loop*loop,struct ev_io*watcher,int revents);
 void total_send(int fd,char *buff, uint32_t len, char func_name[]);
 void total_recv(int fd,char *buff , uint32_t len , char func_name[]);
 void total_encrypt(char*inbuff,char*outbuff,uint32_t len);
 
-void thread_func(int*id);
 
 CONN_INFO*info_init(int browser_fd,int streamid,int thread_id);
 void info_insert(CONN_INFO*head,CONN_INFO*tag);
@@ -62,30 +61,39 @@ CONN_INFO*info_search(CONN_INFO*head,int streamid);
 int main()
 {
 	//SSL_library_init();
-	
+
 	/*
-	if (pthread_mutex_init(&lock,NULL)!=0){
-		printf("mutex lock init error\n");
-		exit(1);
-	}*/
+	   if (pthread_mutex_init(&lock,NULL)!=0){
+	   printf("mutex lock init error\n");
+	   exit(1);
+	   }*/
 	signal(SIGPIPE,SIG_IGN);
 	int server_fd=server_init();
-	struct ev_io fd;
-	pthread_t thread[THREAD_NUM];
-	int i,thread_id[THREAD_NUM];
+	struct ev_io fd,*entry_watcher;
+	int i,thread_id[THREAD_NUM] , id;
 
+	my_loop=ev_default_loop(0);
 
 	for (i=0;i<THREAD_NUM;i++){
 		thread_id[i]=i;
+		id=connect_init(ENTRY_PORT+i,i);
+		if (id==-1){
+			printf("connection fail\n");
+			exit(1);
+		}
 		thread_head[i].browser_fd=-1;
 		thread_head[i].streamid=-1;
 		thread_head[i].thread_id=-1;
 		thread_head[i].next=NULL;
-		pthread_create(&thread[i],NULL,(void*)thread_func,(void*)&thread_id[i]);
+
+		entry_watcher=(struct ev_io*)malloc(sizeof(struct ev_io));
+		entry_watcher->data=(void*)&thread_id[i];
+
+		ev_io_init(entry_watcher,handle_from_entry,entry_fd[i],EV_READ);
+		ev_io_start(my_loop,entry_watcher);
 	}
 
 
-	my_loop=ev_default_loop(0);
 
 	ev_io_init(&fd,browser_connect_to_proxy,server_fd,EV_READ);
 	ev_io_start(my_loop,&fd);
@@ -313,7 +321,7 @@ static void browser_connect_to_proxy(struct ev_loop*loop,struct ev_io*watcher,in
 	memcpy(buff,&streamid,4);
 	memcpy(buff+4,&payload_len,4);
 	memcpy(buff+8,outside,6);
-	
+
 	//-----encrypt-----
 #if ENCRYPT_JUDGE > 0
 	total_encrypt(buff+8,buff+8,6);
@@ -368,7 +376,7 @@ char*getOutsideAddr(int browser_fd)
 
 	//-----socket auth , step two-----
 	outside_addr.sin_family=AF_INET;
-	
+
 	total_recv(browser_fd,buff,4,"getOutsideAddr");
 	if (buff[0]!=5	//socket5
 			||buff[1]!=1){	//CONNECT
@@ -576,64 +584,52 @@ CONN_INFO*info_search(CONN_INFO*head,int streamid)
 
 
 
-void thread_func(int*id)
+static void handle_from_entry(struct ev_loop*loop,struct ev_io*watcher,int revents)
 {
+
+	if (revents&EV_ERROR){
+		printf("EV_ERROR at handle_from_entry\n");
+		return;
+	}
 	struct sockaddr_in entry_addr;
-	struct ev_io*entry_watcher,*browser_watcher;
 	uint32_t streamid , payload_len;
 	char buff[MAXBUFF];
-	int i,receive_num,temp, result;
+	int i,receive_num,temp, result ;
 	CONN_INFO*ptr;
+	int*id=(int*)watcher->data;
 
-	if ( (entry_fd[*id]=socket(AF_INET,SOCK_STREAM,0)) <0 ){
-		printf("open socket error at thread %d\n",*id);
+	total_recv(watcher->fd,buff,4,"handle_from_entry");
+	memcpy(&streamid,buff,4);
+	total_recv(watcher->fd,buff,4,"handle_from_entry");
+	memcpy(&payload_len,buff,4);
+	if(payload_len < 0 || payload_len> 8192 ){
+		//printf("recv EOF from entry , close streamid=%d\n",streamid);
+		//info_delete(&thread_head[*id],info_search(&thread_head[*id],streamid));
+		printf("recv error here ,streamid=%d  , payload_len=%d\n",streamid,payload_len);
+		return;
+	}
+	ptr=info_search(&thread_head[*id],streamid);
+
+
+	if (ptr==NULL){
+		printf("cannot find ptr which streamid=%d , payload_len=%d\n",streamid,payload_len);
+		if (payload_len <8192 && payload_len >=0 )
+			total_recv(watcher->fd,buff,payload_len,"thread_func");
 		return;
 	}
 
-	bzero((char*)&entry_addr,sizeof(entry_addr));
-	entry_addr.sin_family=AF_INET;
-	entry_addr.sin_port=htons(ENTRY_PORT+*id);
-	inet_aton(ENTRY_IP,&entry_addr.sin_addr);
-
-	if ( connect(entry_fd[*id],(struct sockaddr*)&entry_addr,sizeof(entry_addr)) <0 ){
-		printf("connect error at thread %d\n",*id);
-		return;
-	}
-	while (1){
-		total_recv(entry_fd[*id],buff,4,"thread_func");
-		memcpy(&streamid,buff,4);
-		total_recv(entry_fd[*id],buff,4,"thread_func");
-		memcpy(&payload_len,buff,4);
-		if(payload_len < 0 || payload_len> 8192 ){
-			//printf("recv EOF from entry , close streamid=%d\n",streamid);
-			//info_delete(&thread_head[*id],info_search(&thread_head[*id],streamid));
-			printf("recv error here ,streamid=%d  , payload_len=%d\n",streamid,payload_len);
-			continue;
-		}
-		ptr=info_search(&thread_head[*id],streamid);
-
-
-		if (ptr==NULL){
-			printf("cannot find ptr which streamid=%d , payload_len=%d\n",streamid,payload_len);
-			if (payload_len <8192 && payload_len >=0 )
-				total_recv(entry_fd[*id],buff,payload_len,"thread_func");
-			continue;
-		}
-
-		total_recv(entry_fd[*id],buff,payload_len,"thread_func");
+	total_recv(watcher->fd,buff,payload_len,"handle_from_entry");
 #if DEBUG > 0
-		printf("recv from entry ok , streamid=%d , len=%d\n",streamid,payload_len);
+	printf("recv from entry ok , streamid=%d , len=%d\n",streamid,payload_len);
 #endif
 
 
-		//-----decrypt payload-----
+	//-----decrypt payload-----
 #if ENCRYPT_JUDGE > 0
-		aesctr_encrypt(buff,buff,payload_len,OP_KEY);
+	aesctr_encrypt(buff,buff,payload_len,OP_KEY);
 #endif
 
-		total_send(ptr->browser_fd,buff,payload_len,"thread_func");
-	}
-	return;
+	total_send(ptr->browser_fd,buff,payload_len,"handle_from_entry");
 }
 
 
@@ -680,4 +676,28 @@ void total_encrypt(char*inbuff,char*outbuff,uint32_t len)
 	aesctr_encrypt(inbuff,outbuff,len,EXIT_KEY);
 	aesctr_encrypt(inbuff,outbuff,len,MIDDLE_KEY);
 	aesctr_encrypt(inbuff,outbuff,len,ENTRY_KEY);
+}
+
+int connect_init(int port,int id)
+{
+	struct sockaddr_in entry_addr;
+	uint32_t streamid , payload_len;
+	char buff[MAXBUFF];
+	int i,receive_num,temp, result;
+
+	if ( (entry_fd[id]=socket(AF_INET,SOCK_STREAM,0)) <0 ){
+		printf("open socket error at thread %d\n",id);
+		return -1;
+	}   
+
+	bzero((char*)&entry_addr,sizeof(entry_addr));
+	entry_addr.sin_family=AF_INET;
+	entry_addr.sin_port=htons(port);
+	inet_aton(ENTRY_IP,&entry_addr.sin_addr);
+
+	if ( connect(entry_fd[id],(struct sockaddr*)&entry_addr,sizeof(entry_addr)) <0 ){
+		printf("connect error at thread %d\n",id);
+		return -1;
+	}   
+
 }
